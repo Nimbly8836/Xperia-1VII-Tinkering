@@ -1,4 +1,6 @@
-# Xperia 1 VII：FS72 保留数据跨刷与 SIM/eSIM 切换
+# 折腾 Xperia 1 VII
+
+记录 Xperia 1 VII 的折腾过程、实验结论和可复用脚本。目前主要包括 **FS72 保留数据跨刷 FS54** 与 **SIM/eSIM 切换**。
 
 港版 **Xperia 1 VII XQ-FS72** 在不解锁 Bootloader、不 Root、不主动清除用户数据的前提下，使用固定的 **FS54 EU/UK `71.1.A.2.265`** 镜像，并通过系统 SIM 类型入口访问内置 eSIM 的实验记录和工具。
 
