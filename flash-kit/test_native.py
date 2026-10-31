@@ -77,7 +77,7 @@ int main(void) {
 
 @unittest.skipUnless(os.environ.get('XPERIA_NATIVE_TESTS') == '1', 'Set XPERIA_NATIVE_TESTS=1 with native build dependencies installed')
 class NativeTests(unittest.TestCase):
-    def test_transport_hash_stat_and_guards_without_usb(self):
+    def run_native_checks(self, upgrade=False):
         with tempfile.TemporaryDirectory(prefix='native-tests-') as name:
             root = Path(name)
             upstream = build_trial.UPSTREAM.read_bytes()
@@ -85,22 +85,32 @@ class NativeTests(unittest.TestCase):
             source = build_trial.compose(upstream.decode(), (build_trial.ROOT / 'trial_policy.c.in').read_text(), (build_trial.ROOT / 'trial_main.c.in').read_text())
             (root / 'trial-writer.c').write_text(source)
             (root / 'version.h').write_text('#define VERSION 61\n')
-            records = ',\n'.join('{"' + p + '","' + p + '.sin","unused-test-only",1}' for p in build_trial.ORDER)
+            order = [*build_trial.ORDER, *(['bootloader'] if upgrade else [])]
+            records = ',\n'.join('{"' + p + '","' + p + '.sin","unused-test-only",1}' for p in order)
             (root / 'trial_images.h').write_text(
                 'struct trial_image {const char *partition,*name,*sha256;unsigned long long bytes;};\n'
-                '#define TRIAL_IMAGE_COUNT 14\n#define TRIAL_MAX_MEMBER 104857600UL\n'
-                'static const struct trial_image trial_images[14]={' + records + '};\n')
+                f'#define TRIAL_IMAGE_COUNT {len(order)}\n#define TRIAL_MAX_MEMBER 104857600UL\n'
+                f'#define TRIAL_UPGRADE_WRITER {int(upgrade)}\n'
+                f'static const struct trial_image trial_images[{len(order)}]={{' + records + '};\n')
             harness = root / 'harness.c'
             harness.write_text(HARNESS)
             executable = root / 'native-test'
             command = build_trial.compiler_command(platform.system(), harness, executable, root)
-            compiled = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            compiled = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
-            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30, check=False)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('NATIVE_PORTABILITY_TESTS_OK_NO_USB', result.stdout)
             self.assertIn('UPGRADE_READONLY_SELF_TEST_OK_NO_USB', result.stdout)
+            self.assertIn('TRIAL_ANDROID_HANDOFF_SELF_TEST_OK_NO_USB', result.stdout)
+            self.assertIn('TRIAL_COMMIT_CANCEL_SELF_TEST_OK_NO_USB', result.stdout)
             self.assertNotIn('UNEXPECTED_USB_INIT', result.stderr)
+
+    def test_transport_hash_stat_and_guards_without_usb(self):
+        self.run_native_checks()
+
+    def test_upgrade_profile_guards_without_usb(self):
+        self.run_native_checks(upgrade=True)
 
 
 if __name__ == '__main__':

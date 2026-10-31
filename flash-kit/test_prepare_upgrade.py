@@ -94,6 +94,31 @@ class PrepareUpgradeTests(unittest.TestCase):
             self.prepare()
         self.assertFalse(self.destination.exists())
 
+    def test_verify_rechecks_all_fifteen_images_against_original_zip(self):
+        original = self.prepare()
+        records = upgrade.verify(self.source, self.destination)
+        self.assertEqual(records, [{key: item[key] for key in ('partition', 'name', 'bytes', 'sha256')}
+                                  for item in original['images']])
+
+    def test_verify_cannot_be_fooled_by_image_and_manifest_tampering(self):
+        report = self.prepare()
+        item = report['images'][0]
+        path = self.destination / 'images' / item['name']
+        path.chmod(0o600)
+        data = path.read_bytes() + b'changed'
+        path.write_bytes(data)
+        item.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+        (self.destination / 'manifest.json').write_text(json.dumps(report))
+        with self.assertRaises(flashkit.SafetyError):
+            upgrade.verify(self.source, self.destination)
+
+    def test_verify_rejects_review_policy_changes(self):
+        report = self.prepare()
+        report['flash_allowed'] = True
+        (self.destination / 'manifest.json').write_text(json.dumps(report))
+        with self.assertRaises(flashkit.SafetyError):
+            upgrade.verify(self.source, self.destination)
+
     def test_prepared_files_are_readonly_and_match_the_manifest(self):
         report = self.prepare()
         for item in report['images']:

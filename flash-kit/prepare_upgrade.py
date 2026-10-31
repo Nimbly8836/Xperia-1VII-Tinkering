@@ -126,15 +126,70 @@ def prepare(source=SOURCE, destination=DESTINATION):
         raise
 
 
+def verify(source=SOURCE, destination=DESTINATION):
+    if destination.is_symlink() or not destination.is_dir():
+        raise flashkit.SafetyError('Upgrade candidate missing or linked')
+    expected_names = [part + flashkit.SUFFIX for part in build_trial.ORDER] + [BOOTLOADER]
+    expected_files = {'manifest.json', 'NOT_APPROVED.txt'} | {'images/' + name for name in expected_names}
+    actual = set()
+    for path in destination.rglob('*'):
+        relative = path.relative_to(destination).as_posix()
+        if path.is_symlink() or (path.is_dir() and relative != 'images'):
+            raise flashkit.SafetyError('Unexpected directory/link in upgrade candidate')
+        if path.is_file():
+            actual.add(relative)
+        elif not path.is_dir():
+            raise flashkit.SafetyError('Special files are not permitted')
+    if actual != expected_files or (destination / 'manifest.json').stat().st_size > 1024 * 1024:
+        raise flashkit.SafetyError('Upgrade candidate file set differs from the fixed review material')
+    manifest = flashkit.read_json(destination / 'manifest.json')
+    if (not isinstance(manifest, dict) or type(manifest.get('schema')) is not int or manifest['schema'] != 1
+            or manifest.get('purpose') != 'offline_upgrade_review_only' or manifest.get('flash_allowed') is not False
+            or manifest.get('not_a_write_sequence') is not True or manifest.get('source_zip_name') != source.name
+            or manifest.get('source_zip_sha256') != RELEASE['sha256'] or manifest.get('target_version') != '71.2.A.2.35'
+            or manifest.get('boot_config_reference_sha256') != BOOT_CONFIG_SHA256
+            or (destination / 'NOT_APPROVED.txt').read_text() != MARKER):
+        raise flashkit.SafetyError('Upgrade review policy/source metadata changed')
+    records = manifest.get('images')
+    if not isinstance(records, list) or len(records) != 15 or any(not isinstance(item, dict) for item in records):
+        raise flashkit.SafetyError('Invalid upgrade image records')
+    expected = []
+    with flashkit.source_snapshot(source, RELEASE['sha256']) as archive:
+        entries = audit_upgrade.checked_entries(archive, max_entries=64, max_total=25 * 1024**3)
+        if {entry.filename for entry in entries} != flashkit.EXPECTED_MEMBERS:
+            raise flashkit.SafetyError('Unexpected upgrade ZIP inventory')
+        for partition in build_trial.ORDER:
+            name = partition + flashkit.SUFFIX
+            with archive.open(name) as stream:
+                digest, size = flashkit.sha256_stream(stream)
+            expected.append({'partition': partition, 'name': name, 'bytes': size, 'sha256': digest})
+        if archive.getinfo('boot.zip').file_size > 64 * 1024**2:
+            raise flashkit.SafetyError('Unexpected boot delivery size')
+        with zipfile.ZipFile(io.BytesIO(archive.read('boot.zip'))) as boot:
+            audit_upgrade.checked_entries(boot, max_entries=64, max_total=128 * 1024**2)
+            boot_bytes = boot.read(BOOTLOADER)
+            config = boot.read('PDX256_XBootConfig_MiscTA.ta')
+        if hashlib.sha256(boot_bytes).hexdigest() != BOOTLOADER_SHA256 or hashlib.sha256(config).hexdigest() != BOOT_CONFIG_SHA256:
+            raise flashkit.SafetyError('Boot delivery does not match fixed references')
+        expected.append({'partition': 'bootloader', 'name': BOOTLOADER, 'bytes': len(boot_bytes), 'sha256': BOOTLOADER_SHA256})
+        for record, original in zip(records, expected, strict=True):
+            path = destination / 'images' / original['name']
+            if (any(record.get(key) != value for key, value in original.items())
+                    or path.stat().st_size != original['bytes'] or flashkit.sha256_file(path) != original['sha256']):
+                raise flashkit.SafetyError('Staged upgrade image differs from the fixed original: ' + original['name'])
+    return expected
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, default=DESTINATION)
+    parser.add_argument('--verify', action='store_true', help='Verify existing materials without recreating them')
     args = parser.parse_args()
     os.umask(0o077)
     with (flashkit.KIT / '.prepare-upgrade.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = prepare(destination=args.output)
-    print(json.dumps({'images_staged': len(result['images']), 'directory': str(args.output),
+        result = verify(destination=args.output) if args.verify else prepare(destination=args.output)['images']
+    print(json.dumps({'images_staged': len(result), 'directory': str(args.output),
                       'flash_allowed': False, 'phone_accessed': False}, indent=2))
 
 

@@ -71,7 +71,7 @@ python3 scripts/switch_sim.py esim --serial YOUR_ADB_SERIAL --execute
 
 刷机工具使用 14 个原始 FS54 `.265` 镜像，不解锁、不 Root，不主动清除用户数据；但系统更新和刷写失败仍可能导致数据丢失。它保留原 Bootloader，不是完整备份或恢复工具。具体写入范围见 [TRIAL.md](flash-kit/TRIAL.md)，实机结果见[验证记录](docs/verified-results.md)。
 
-SIM 脚本通过系统接口切换实体卡与内置 eSIM，不删除套餐。`.35` 升级仍在研究中，见[新版说明](docs/firmware-71.2.A.2.35-research.md)。
+SIM 脚本通过系统接口切换实体卡与内置 eSIM，不删除套餐。已跨刷手机的 `.265 → .35` 有独立的[实验性升级入口](docs/upgrade-run.md)，会更新 Bootloader，尚未实机升级；不能使用本页的 `.265` 包代替。
 
 ## 源码构建（使用预构建包可跳过）
 

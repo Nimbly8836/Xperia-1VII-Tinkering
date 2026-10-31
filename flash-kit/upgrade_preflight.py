@@ -53,7 +53,7 @@ def summarize(code, text):
             'boot_config_matches_reference': matches,
             'bootloader_has_slot': slot,
             'phone_write_requested': False, 'flash_allowed': False,
-            'note': 'This is inspection evidence, not an implemented or validated .35 upgrade.'}
+            'note': 'Inspection evidence only; not write authorization or proof of a successful .35 upgrade.'}
 
 
 def probe_from_baseline(baseline, session):

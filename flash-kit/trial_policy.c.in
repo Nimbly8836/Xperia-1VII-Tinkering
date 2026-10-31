@@ -9,6 +9,16 @@
 #include <stdint.h>
 #include <time.h>
 #include "trial_images.h"
+#ifndef TRIAL_UPGRADE_WRITER
+#define TRIAL_UPGRADE_WRITER 0
+#endif
+#ifndef TRIAL_CONFIRMATION
+#define TRIAL_CONFIRMATION "FS72_TO_FS54_265_A_KEEP_DATA_TRIAL"
+#endif
+_Static_assert(TRIAL_IMAGE_COUNT == (TRIAL_UPGRADE_WRITER ? 15 : 14), "Unexpected fixed image count");
+
+static bool trial_control_cancelled(void);
+static void trial_request_stop(int number);
 
 enum trial_phase { TRIAL_READ, TRIAL_BEGIN, TRIAL_IMAGES, TRIAL_COMMIT };
 static enum trial_phase trial_phase = TRIAL_READ;
@@ -43,7 +53,7 @@ enum trial_fault { FAULT_NONE, FAULT_DATA_FAIL_PREFIX, FAULT_DATA_OKAY_PREFIX, F
                    FAULT_BATTERY_FAKE_OKAY, FAULT_BATTERY_NUL_SUFFIX,
                    FAULT_TA_MISMATCH, FAULT_TA_SIZE, FAULT_TA_ACK, FAULT_BOOTLOADER_SLOT, FAULT_BOOTLOADER_NO_SLOT,
                    FAULT_TA_SEPARATE_ACK, FAULT_TA_HEADER_NUL, FAULT_TA_HEADER_JUNK,
-                   FAULT_PRODUCT_FS54, FAULT_PRODUCT_FS72 };
+                   FAULT_PRODUCT_FS54, FAULT_PRODUCT_FS72, FAULT_BOOTLOADER_FLASH, FAULT_COMMIT_CANCEL };
 static enum trial_fault trial_fault = FAULT_NONE;
 static char trial_mock_reply[1024];
 static unsigned trial_mock_root_stage = 0;
@@ -53,6 +63,8 @@ static const char *trial_loader_normalized = "87500001XBOOTSM8750LA10V36";
 
 static bool trial_target(const char *target) {
     if (!trial_partition) return false;
+    if (!strcmp(trial_partition,"bootloader"))
+        return TRIAL_UPGRADE_WRITER && trial_completed==TRIAL_IMAGE_COUNT-1 && !strcmp(target,"bootloader_a");
     char slotted[80];
     snprintf(slotted, sizeof(slotted), "%s_a", trial_partition);
     return !strcmp(trial_partition,"super") ? !strcmp(target,"super") : !strcmp(target,slotted);
@@ -95,6 +107,7 @@ static bool trial_command_allowed(const char *command) {
             (strcmp(command, "Sync") == 0 || strcmp(command, "set_active:a") == 0);
     }
     if (trial_phase != TRIAL_IMAGES || !trial_partition) return false;
+    if (!strcmp(trial_partition,"bootloader") && (!TRIAL_UPGRADE_WRITER || trial_completed!=TRIAL_IMAGE_COUNT-1)) return false;
     if (strncmp(command, "erase:", 6) == 0) return trial_target(command + 6);
     if (strncmp(command, "flash:", 6) == 0) return trial_target(command + 6);
     if (strcmp(command, "signature") == 0) return true;
@@ -189,6 +202,9 @@ static unsigned long trial_mock_transfer(int ep, char *bytes, unsigned long size
             strcpy(trial_mock_reply, "FAILsimulation-injected"); return size;
         }
     }
+    if (trial_fault==FAULT_BOOTLOADER_FLASH && !strcmp(command,"flash:bootloader_a")) {
+        strcpy(trial_mock_reply,"FAILbootloader-injected");return size;
+    }
     if (!strcmp(command,"Read-TA:2:2127") || !strcmp(command,"Read-TA:2:2301")) {
         trial_mock_ta_unit=!strcmp(command,"Read-TA:2:2127")?2127:2301;
         trial_mock_ta_stage=1;
@@ -197,13 +213,13 @@ static unsigned long trial_mock_transfer(int ep, char *bytes, unsigned long size
     } else if (strncmp(command, "getvar:", 7) == 0) {
         const char *key = command + 7; const char *value = NULL;
         if (!strcmp(key,"product")) value=trial_fault==FAULT_PRODUCT_FS54?"XQ-FS54":
-            trial_fault==FAULT_PRODUCT_FS72?"XQ-FS72":trial_upgrade_probe?"XQ-FS54":"XQ-FS72";
+            trial_fault==FAULT_PRODUCT_FS72?"XQ-FS72":(trial_upgrade_probe || TRIAL_UPGRADE_WRITER)?"XQ-FS54":"XQ-FS72";
         else if (!strcmp(key,"serialno")) value="SIMULATION_ONLY";
         else if (!strcmp(key,"version-bootloader")) value="8750-0001_X_Boot_SM8750_LA1.0_V_36";
         else if (!strcmp(key,"secure")) value="yes";
         else if (!strcmp(key,"Default-security")) value="ON";
         else if (!strcmp(key,"slot-count")) value="2";
-        else if (!strcmp(key,"current-slot")) value="b";
+        else if (!strcmp(key,"current-slot")) value=TRIAL_UPGRADE_WRITER?"a":"b";
         else if (!strcmp(key,"max-download-size")) value="536870912";
         else if (!strcmp(key,"Sector-size")) value="4096";
         else if (!strcmp(key,"Battery")) {
@@ -232,18 +248,23 @@ static unsigned long trial_mock_transfer(int ep, char *bytes, unsigned long size
         else snprintf(trial_mock_reply,sizeof(trial_mock_reply),"DATA%08lx",trial_pending);
     } else if (!strncmp(command,"signature:",10)) {
         strcpy(trial_mock_reply,"FAILuse-modern-signature");
-    } else strcpy(trial_mock_reply,"OKAY");
+    } else {
+        strcpy(trial_mock_reply,"OKAY");
+        if (trial_fault==FAULT_COMMIT_CANCEL && trial_phase==TRIAL_COMMIT && !strcmp(command,"Sync"))
+            trial_request_stop(0);
+    }
     return size;
 }
 
 static bool trial_ok(HANDLE device, const char *command) {
+    if (trial_control_cancelled()) return false;
     if (!trial_send_command(device, command) || !get_reply(device, EP_IN, tmp, sizeof(tmp), USB_TIMEOUT, 0)) return false;
     if (strcmp(tmp_reply,"OKAY")) { fprintf(stderr,"TRIAL_RESPONSE_FAILED %s\n",command); return false; }
-    return true;
+    return !trial_control_cancelled();
 }
 
 static bool trial_flash_mode(HANDLE device, bool entering) {
-    if ((entering && trial_phase != TRIAL_BEGIN) || (!entering && trial_phase != TRIAL_COMMIT)) return false;
+    if (trial_control_cancelled() || (entering && trial_phase != TRIAL_BEGIN) || (!entering && trial_phase != TRIAL_COMMIT)) return false;
     if (!trial_send_command(device,"download:00000001") || !get_reply(device,EP_IN,tmp,sizeof(tmp),USB_TIMEOUT,0) || !trial_last_reply_is_data || strcmp(tmp_reply,"DATA00000001")) return false;
     char value = entering ? 1 : 0;
     if (!transfer_bulk_async(device,EP_OUT,&value,1,USB_TIMEOUT,1) || !get_reply(device,EP_IN,tmp,sizeof(tmp),USB_TIMEOUT,0) || strcmp(tmp_reply,"OKAY")) return false;
@@ -319,12 +340,13 @@ static bool trial_battery_baseline_fresh(void) {
 }
 
 static bool trial_battery_ready_to_write(void) {
+    if (TRIAL_UPGRADE_WRITER) return !trial_recorded_battery_accepted && trial_battery_baseline_fresh();
     return !trial_battery_fallback_used || trial_battery_baseline_fresh();
 }
 
 static bool trial_device_check(HANDLE device, const char *expected_serial) {
     trial_battery_fallback_used=false;
-    const char *expected_product=trial_upgrade_probe?"XQ-FS54":"XQ-FS72";
+    const char *expected_product=(trial_upgrade_probe || TRIAL_UPGRADE_WRITER)?"XQ-FS54":"XQ-FS72";
     char p[64],s[128],loader[128],root[128],secured[32],default_sec[32],slots[8],active[8],maxdl[32],sector[32],battery[32],snapshot[32];
     if (!trial_get(device,"product",p,sizeof(p)) || !trial_get(device,"serialno",s,sizeof(s)) ||
         !trial_get(device,"version-bootloader",loader,sizeof(loader)) || !trial_read_root_hash(device,root,sizeof(root)) ||
@@ -353,7 +375,7 @@ static bool trial_device_check(HANDLE device, const char *expected_serial) {
     unsigned long download_size,sector_bytes,charge;
     if (strcmp(p,expected_product) || strcmp(s,expected_serial) || strcmp(normalized,trial_loader_normalized) ||
         strcmp(hash_normalized,trial_root_hash) || strcmp(secured,"yes") || strcmp(default_sec,"ON") ||
-        strcmp(slots,"2") || (strcmp(active,"a") && strcmp(active,"b")) ||
+        strcmp(slots,"2") || (strcmp(active,"a") && strcmp(active,"b")) || (TRIAL_UPGRADE_WRITER && strcmp(active,"a")) ||
         !trial_uint(maxdl,&download_size) || download_size<TRIAL_MAX_MEMBER || download_size>1024UL*1024*1024 ||
         !trial_uint(sector,&sector_bytes) || sector_bytes!=4096 || !trial_uint(battery,&charge) || charge<60 || charge>100) {
         fprintf(stderr,"TRIAL_DEVICE_GUARD_FAILED: no writes permitted; review the reported values.\n"); return false;
@@ -370,6 +392,6 @@ static bool trial_device_check(HANDLE device, const char *expected_serial) {
     max_download_size=(unsigned int)download_size;
     strcpy(current_slot,"a");
     is_2021_device=true;
-    printf("TRIAL_TARGET_SLOT=a; ORIGINAL_SLOT=%s; BOOTLOADER_PRESERVED\n",active);
+    printf("TRIAL_TARGET_SLOT=a; ORIGINAL_SLOT=%s; BOOTLOADER=%s\n",active,TRIAL_UPGRADE_WRITER?"V40_A_UPDATE_LAST":"PRESERVED");
     return true;
 }

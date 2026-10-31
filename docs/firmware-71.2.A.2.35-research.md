@@ -4,8 +4,8 @@
 
 ## 当前结论
 
-- **已完成**：官方版本查询、完整 ZIP 校验、GPT/Bootloader 比较、主与链 AVB 签名/hash/hashtree 验证、super 元数据核查、15 个升级参考镜像整理、Android 源版本与 VBMeta 摘要核对。已增加只读 Flash 模式检查工具，真实设备检查尚待 USB 连接和电量条件满足。
-- **尚未完成**：`.265` → `.35` 的实际刷写策略与验证。`audit_upgrade.py execute` 明确拒绝；原 `trial.py` 仍锁定 `.265` / V36，SIM 切换脚本也未盲目放行 `.35`。
+- **已完成**：官方版本查询、完整 ZIP 校验、GPT/Bootloader 比较、主与链 AVB 签名/hash/hashtree 验证、super 元数据核查、15 个升级参考镜像整理、Android 源版本与 VBMeta 摘要核对。真实 USB / Flash 检查已通过；固定 15 镜像的实验性升级程序已编译并通过离线模拟。
+- **尚未完成**：`.35` 实际升级、数据迁移与功能验收。专用实验入口见[升级说明](upgrade-run.md)，实际写入需另外确认。`audit_upgrade.py execute` 仍只是拒绝入口，原 `.265` 入口/发行包不能用来升级，SIM 切换脚本也未盲目放行 `.35`。
 - **关键差异**：Sony 官方元数据将 `.265` 标为 Android **16**、`.35` 标为 Android **17**；包内 boot delivery 从 **V36 变为 V40**。不能只改版本号、哈希或把 Bootloader 检查放宽成“至少 V36”。
 - Linux 工具链移植已完成离线验证，但**主机兼容不等于新版固件兼容**。详见 [Linux 指南](linux.md)。
 
@@ -117,7 +117,7 @@ firmware-downloads/.venv/bin/python flash-kit/audit_upgrade.py audit \
 python3 flash-kit/audit_upgrade.py execute
 ```
 
-`audit` 成功的退出码仅代表文件审查完成。**目前没有 `.35` 的 run/force/自动升级入口。** `status/execute` 不依赖 XML 库；只有实际解析包需要它。
+`audit` 成功的退出码仅代表文件审查完成，不执行升级。专用实验性 `upgrade_trial.py run` 是独立入口，仍需新检查和人工确认，没有 force 或自动升级。`status/execute` 不依赖 XML 库；只有实际解析包需要它。
 
 包含 XML 审查和原生桩的全套离线测试：
 
@@ -130,13 +130,13 @@ firmware-downloads/.venv/bin/python -m unittest discover -s scripts -p 'test_*.p
 
 ## 5. 尚需完成的升级工作
 
-1. **当前手机基线**：已只读确认 FS54 `.265`、HK SKU、locked/green、DSDS、槽 A，且 VBMeta 摘要与旧包一致。仍需在 Flash 模式读取 Bootloader 路由、boot-config 和快照状态；无线 ADB 不能替代 USB 连接。
-2. **Bootloader 策略**：验证 V36 是否支持新启动链；若必须更新 V40，需要单独设计/审查 signed boot delivery、配置匹配、槽位、隐式 TA 操作及中断恢复。不能把 V36→V40 文本替换或使用裸 Newflasher 当实现。
-3. **系统/基带与数据**：AVB 签名、引用镜像完整性、向前 rollback 数值和 super 布局已核查；设备实际计数、底层固件协作及 Android 跨代数据迁移仍需结合升级策略和实际验收。尚未批准写入集合与顺序。
+1. **当前手机基线**：已只读确认 FS54 `.265`、HK SKU、locked/green、DSDS、槽 A，且 VBMeta 摘要与旧包一致。已在 Flash 模式核对 V36、A 槽、快照 none、Bootloader 分槽支持和两项 boot-config 参考值。实际运行还会重新检查；无线 ADB 不能替代 USB 连接。
+2. **Bootloader 策略**：实验流程选择在 14 个系统/无线镜像完成后，最后向 `bootloader_a` 发送原厂 V40 复合包；配置必须匹配但不重新写 boot-config。原始 GZIP 仅解包为原 TAR，签名和载荷不改。复合包的设备端处理及中断恢复仍有风险，不保证保留 V36 或失败回退。
+3. **系统/基带与数据**：AVB 签名、引用镜像完整性、向前 rollback 数值和 super 布局已核查；设备实际计数、底层固件协作及 Android 跨代数据迁移仍需实际验收。写入集合和顺序已固定在独立编译的实验程序中，不由可编辑清单授权。
 4. **恢复与测试**：HK 新包已经取得，但没有因此验证无损恢复；旧 B 槽不是完整快照，降级不能默认安全。须保留独立数据备份与 eSIM 恢复方式，设计失败停止/恢复流程。
 5. **新 SIM 入口**：静态核查确认同一广播入口和 0/1 分支仍存在，Google LPA 相同、Qti 内部实现改变，见[切卡核查](upgrade-esim-findings.md)。仍需升级后的实机验收。
 
-本轮不把缺失证据解释成“肯定不能升级”，也不把一个案例的旧版成功解释成“新版可安全升级”。**当前已备好升级材料与只读检查工具，仍不是已完成 `.35` 实刷适配。**
+本轮不把缺失证据解释成“肯定不能升级”，也不把一个案例的旧版成功解释成“新版可安全升级”。**当前已准备好受限实验性升级流程，尚未取得 `.35` 实机升级成功记录。**
 
 ## 6. 来源（公开入口）
 

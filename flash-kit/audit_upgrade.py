@@ -36,10 +36,10 @@ RELEASES = {
 }
 BLOCKERS = [
     'The .265 -> .35 path changes Android generation and boot delivery V36 -> V40.',
-    'No verified V36 compatibility or reviewed V40/boot-config migration is implemented.',
-    'Package AVB and super layout passed offline checks; device counters and user-data migration/recovery remain unverified.',
-    'USB Flash-mode bootloader routing and boot-config inspection is still required; this tool does not authorize writes.',
-    'The .265 writer is not an upgrade writer; no image list is authorized for .35.',
+    'The dedicated .35/V40 upgrade is experimental and has no real-device upgrade result yet.',
+    'Package AVB and super layout passed offline checks; user-data migration and failure recovery are not guaranteed.',
+    'Fresh Android/Flash checks and separate V40 confirmation are required for every real run.',
+    'This audit command never authorizes writes; the legacy .265 entry cannot perform the .35 upgrade.',
 ]
 
 

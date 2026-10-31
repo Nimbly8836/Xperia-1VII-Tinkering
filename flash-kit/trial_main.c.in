@@ -3,7 +3,11 @@
 #include <signal.h>
 
 static volatile sig_atomic_t trial_stop_requested = 0;
+static pid_t trial_control_parent = 0;
 static void trial_request_stop(int number) { (void)number; trial_stop_requested = 1; }
+static bool trial_control_cancelled(void) {
+    return trial_stop_requested || (trial_control_parent && getppid()!=trial_control_parent);
+}
 
 static bool trial_hash_file(FILE *file, const char *wanted, unsigned long long expected_size) {
     unsigned char buffer[1024*1024], digest[32];
@@ -171,7 +175,8 @@ static bool trial_upgrade_probe_self_test(void) {
     trial_fault=FAULT_PRODUCT_FS54;
     if (!trial_device_check(NULL,"SIMULATION_ONLY")) return false;
     trial_upgrade_probe=false;
-    if (trial_device_check(NULL,"SIMULATION_ONLY")) return false; /* Do not widen the .265 writer. */
+    trial_fault=TRIAL_UPGRADE_WRITER?FAULT_PRODUCT_FS72:FAULT_PRODUCT_FS54;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return false; /* Retain each profile's exact model. */
     trial_upgrade_probe=true;trial_fault=FAULT_NONE;
     if (!trial_upgrade_checks(NULL)) return false;
     const enum trial_fault valid_replies[]={FAULT_BOOTLOADER_NO_SLOT,FAULT_TA_SEPARATE_ACK,FAULT_TA_HEADER_NUL};
@@ -220,6 +225,13 @@ static int trial_self_test(void) {
     trial_partition="super";
     if(!trial_slot_answer_ok("super","no") || trial_slot_answer_ok("super","FAIL") || trial_slot_answer_ok("super","yes") ||
        !trial_command_allowed("erase:super") || trial_command_allowed("erase:super_a")) return 1;
+    trial_partition="bootloader";trial_completed=0;
+    if(trial_command_allowed("flash:bootloader_a") || trial_command_allowed("download:00000001")) return 1;
+    trial_completed=TRIAL_IMAGE_COUNT-1;
+    if(trial_command_allowed("flash:bootloader_a") != (TRIAL_UPGRADE_WRITER!=0) ||
+       trial_command_allowed("erase:bootloader_a") != (TRIAL_UPGRADE_WRITER!=0) ||
+       trial_command_allowed("flash:bootloader") || trial_command_allowed("flash:bootloader_b") ||
+       trial_command_allowed("Write-TA:2:2127") || trial_command_allowed("Write-TA:2:2301")) return 1;
     trial_phase=TRIAL_COMMIT;trial_completed=TRIAL_IMAGE_COUNT-1;
     if(trial_command_allowed("set_active:a") || trial_command_allowed("Write-TA:2:10100")) return 1;
     trial_completed=TRIAL_IMAGE_COUNT;
@@ -275,13 +287,23 @@ static int trial_self_test(void) {
     char *recorded[]={"--android-battery","98","--battery-observed-at",timestamp,"--accept-recorded-battery"};
     if (trial_battery_options(4,recorded) || !trial_battery_options(5,recorded)) return 1;
     trial_fault=FAULT_BATTERY_UNSUPPORTED;
-    if (!trial_device_check(NULL,"SIMULATION_ONLY") || !trial_battery_ready_to_write()) return 1;
+    if (!trial_device_check(NULL,"SIMULATION_ONLY") || trial_battery_ready_to_write()!=(TRIAL_UPGRADE_WRITER==0)) return 1;
     trial_fault=FAULT_BATTERY_LOW;
     if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
     snprintf(timestamp,sizeof(timestamp),"%lu",(unsigned long)time(NULL)+60);
     if (trial_battery_options(5,recorded)) return 1;
     if (trial_touched || trial_raw_bytes!=0) return 1;
     puts("TRIAL_BATTERY_SELF_TEST_OK_NO_USB");
+    trial_recorded_battery_accepted=false;trial_battery_fallback_used=false;
+    trial_android_battery=100;trial_battery_observed_at=(unsigned long)time(NULL)-601;
+    if (trial_battery_ready_to_write()!=(TRIAL_UPGRADE_WRITER==0)) return 1;
+    trial_battery_observed_at=(unsigned long)time(NULL);
+    puts("TRIAL_ANDROID_HANDOFF_SELF_TEST_OK_NO_USB");
+    trial_phase=TRIAL_COMMIT;trial_completed=TRIAL_IMAGE_COUNT;trial_partition=NULL;trial_fault=FAULT_COMMIT_CANCEL;
+    if (trial_ok(NULL,"Sync") || !trial_stop_requested || trial_flash_mode(NULL,false) || trial_ok(NULL,"set_active:a")) return 1;
+    if (trial_touched || trial_mutations || trial_raw_bytes) return 1;
+    trial_stop_requested=0;trial_phase=TRIAL_READ;trial_completed=0;trial_fault=FAULT_NONE;
+    puts("TRIAL_COMMIT_CANCEL_SELF_TEST_OK_NO_USB");
     if (!trial_upgrade_probe_self_test()) return 1;
     puts("TRIAL_GUARD_SELF_TEST_OK_NO_USB");return 0;
 }
@@ -293,12 +315,14 @@ int main(int argc,char **argv) {
     signal(SIGTERM,trial_request_stop);
     signal(SIGPIPE,SIG_IGN);
     pid_t initial_parent=getppid();
+    trial_control_parent=initial_parent;
     bool probe=false; const char *expected_serial=NULL;
     if(argc==2 && !strcmp(argv[1],"--self-test")) return trial_self_test();
     if(argc==2 && !strcmp(argv[1],"--upgrade-probe-simulate")) {
         probe=true;trial_upgrade_probe=true;trial_simulation=true;expected_serial="SIMULATION_ONLY";
     } else if(argc>=2 && !strcmp(argv[1],"--simulate")) {
         trial_simulation=true; expected_serial="SIMULATION_ONLY";
+        if (TRIAL_UPGRADE_WRITER) {trial_android_battery=80;trial_battery_observed_at=(unsigned long)time(NULL);}
         if(argc==4 && !strcmp(argv[2],"--fail-at")) {
             unsigned long value;
             if(!trial_uint(argv[3],&value) || value==0 || value>10000) return 2;
@@ -308,20 +332,28 @@ int main(int argc,char **argv) {
             else if(!strcmp(argv[3],"data-okay-prefix")) trial_fault=FAULT_DATA_OKAY_PREFIX;
             else if(!strcmp(argv[3],"super-slot-failure")) trial_fault=FAULT_SUPER_SLOT;
             else if(!strcmp(argv[3],"snapshot-merging")) trial_fault=FAULT_SNAPSHOT_MERGING;
+            else if(!strcmp(argv[3],"commit-cancel")) trial_fault=FAULT_COMMIT_CANCEL;
+            else if(TRIAL_UPGRADE_WRITER && !strcmp(argv[3],"bootloader-slot-failure")) trial_fault=FAULT_BOOTLOADER_NO_SLOT;
+            else if(TRIAL_UPGRADE_WRITER && !strcmp(argv[3],"boot-config-mismatch")) trial_fault=FAULT_TA_MISMATCH;
+            else if(TRIAL_UPGRADE_WRITER && !strcmp(argv[3],"bootloader-flash-failure")) trial_fault=FAULT_BOOTLOADER_FLASH;
             else return 2;
         } else if(argc!=2) return 2;
     } else if((argc==3 || argc==7 || argc==8) && (!strcmp(argv[1],"--probe") || !strcmp(argv[1],"--upgrade-probe"))) {
         probe=true;expected_serial=argv[2];trial_upgrade_probe=!strcmp(argv[1],"--upgrade-probe");
-        if (trial_upgrade_probe && argc==8) return 2; /* No historical-battery override. */
+        if ((trial_upgrade_probe || TRIAL_UPGRADE_WRITER) && argc==8) return 2; /* No historical-battery override. */
         if (!trial_battery_options(argc-3,argv+3)) return 2;
-    } else if((argc==4 || argc==8 || argc==9) && !strcmp(argv[1],"--flash") && !strcmp(argv[3],"FS72_TO_FS54_265_A_KEEP_DATA_TRIAL")) {
+    } else if((argc==4 || argc==8 || argc==9) && !strcmp(argv[1],"--flash") && !strcmp(argv[3],TRIAL_CONFIRMATION)) {
+        if (TRIAL_UPGRADE_WRITER && argc!=8) return 2; /* Fresh Android handoff is mandatory. */
         expected_serial=argv[2];
         if (!trial_battery_options(argc-4,argv+4)) return 2;
     }
-    else {fprintf(stderr,"Usage: --self-test | --simulate [--fail-at N] | --probe SERIAL | --flash SERIAL FS72_TO_FS54_265_A_KEEP_DATA_TRIAL\n");return 2;}
+    else {fprintf(stderr,"Usage: --self-test | --simulate [--fail-at N] | --probe SERIAL | --flash SERIAL %s\n",TRIAL_CONFIRMATION);return 2;}
     if(!expected_serial || !*expected_serial || strlen(expected_serial)>100) return 2;
     for(const char *s=expected_serial;*s;s++) if(!isalnum((unsigned char)*s) && *s!='_' && *s!='-' && *s!='.') return 2;
-    printf("FS72_PRESERVE_TRIAL_V1 mode=%s; experimental; no userdata/metadata/EFS/GPT/bootloader writes\n",probe?"read-only-probe":trial_simulation?"SIMULATION_NO_USB":"LIVE_FLASH");
+    printf("%s mode=%s; experimental; no userdata/metadata/EFS/GPT writes; bootloader=%s\n",
+        TRIAL_UPGRADE_WRITER?"FS54_265_TO_35_V40_TRIAL":"FS72_PRESERVE_TRIAL_V1",
+        probe?"read-only-probe":trial_simulation?"SIMULATION_NO_USB":"LIVE_FLASH",
+        TRIAL_UPGRADE_WRITER?"A_UPDATE_LAST":"PRESERVED");
     FILE *inputs[TRIAL_IMAGE_COUNT]={0}; struct stat snapshots[TRIAL_IMAGE_COUNT];
     HANDLE device=NULL; int claimed=-1; int result=1; char working_path[PATH_MAX];
     if(!getcwd(working_path,sizeof(working_path)) || strlen(working_path)>150) return 2;
@@ -342,6 +374,12 @@ int main(int argc,char **argv) {
     if(trial_stop_requested || getppid()!=initial_parent) goto done;
     device=trial_simulation?(HANDLE)(uintptr_t)1:trial_open_usb(&claimed);
     if(!device || !trial_device_check(device,expected_serial)) goto done;
+    if (TRIAL_UPGRADE_WRITER && !trial_upgrade_probe) {
+        trial_upgrade_probe=true;
+        bool configuration_matches=trial_upgrade_checks(device);
+        trial_upgrade_probe=false;
+        if (!configuration_matches) goto done;
+    }
     if(probe) {
         if (trial_upgrade_probe && !trial_upgrade_checks(device)) goto done;
         puts(trial_upgrade_probe?"UPGRADE_READONLY_PROBE_OK_NO_WRITES":"TRIAL_PROBE_OK_NO_WRITES");

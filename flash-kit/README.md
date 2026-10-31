@@ -4,7 +4,7 @@
 
 先阅读根目录 [README](../README.md) 的适用范围、依赖、固件来源、操作和风险；详细写入边界见 [TRIAL.md](TRIAL.md)。
 
-支持 macOS/APFS 和 Linux。Linux 的依赖、临时副本空间、udev 权限与验证范围见 [Linux 指南](../docs/linux.md)。Linux 实机尚未验证；`.35` 跨代升级仍被阻止，不能直接替换此处的固件输入。
+支持 macOS/APFS 和 Linux。Linux 的依赖、临时副本空间、udev 权限与验证范围见 [Linux 指南](../docs/linux.md)。Linux 实机尚未验证；`.35` 使用独立的[实验性升级入口](../docs/upgrade-run.md)，不能直接替换此处的固件输入。
 
 ## 发行包与源码两条入口
 
@@ -17,6 +17,9 @@
 |---|---|
 | `flashkit.py` | `.265` 离线 audit/prepare/verify；可选只读 ADB preflight。其 execute 始终拒绝 |
 | `audit_upgrade.py` | `.265` → `.35` 原始包与 boot delivery 离线审查；其 execute 始终拒绝，不读取手机 |
+| `prepare_upgrade.py` / `build_upgrade.py` | 固定 `.35` 材料核对、解开 Bootloader 的 GZIP 外层并独立编译，不访问手机 |
+| `upgrade_preflight.py run` | 升级准备的只读设备检查，不会续刷 |
+| `upgrade_trial.py run` | **独立的真实 `.35` 升级入口**，最后更新 V40 Bootloader A，需新基线和独立确认；尚未实机升级 |
 | `build_trial.py` | 校验固定 Newflasher 源码、转换并编译受限原生程序；不访问 USB |
 | `trial_policy.c.in` / `trial_main.c.in` | 命令白名单、模拟实现及受限执行流程 |
 | `trial.py simulate` | 读取真实固定固件做协议模拟；不访问 USB |

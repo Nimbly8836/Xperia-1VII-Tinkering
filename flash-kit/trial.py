@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 BINARY = ROOT / 'build/fs72-preserve-trial'
 RECEIPT = ROOT / 'build/build-receipt.json'
 PHRASE = 'FS72_TO_FS54_265_A_KEEP_DATA_TRIAL'
+UPGRADE_PHRASE = 'FS54_265_TO_35_V40_A_KEEP_DATA_TRIAL'
 TRIAL_BASELINE = dict(flashkit.BASELINE, **{'ro.build.display.id': '71.1.A.2.265 release-keys'})
 INPUTS = {'upstream/newflasher-59f12e4.c.txt', 'build_trial.py', 'trial_policy.c.in',
           'trial_main.c.in', 'flashkit.py', 'trial.py', 'build/trial_images.h'}
@@ -196,7 +197,10 @@ def simulate(fail_at=None, fault=None, *, materials=None):
             raise flashkit.SafetyError('Invalid simulation failure point')
         arguments.extend(['--fail-at', str(fail_at)])
     if fault is not None:
-        if fault not in {'data-fail-prefix', 'data-okay-prefix', 'super-slot-failure', 'snapshot-merging'}:
+        allowed_faults = {'data-fail-prefix', 'data-okay-prefix', 'super-slot-failure', 'snapshot-merging', 'commit-cancel'}
+        if receipt.get('trial_plan') == 'upgrade-35':
+            allowed_faults |= {'bootloader-slot-failure', 'boot-config-mismatch', 'bootloader-flash-failure'}
+        if fault not in allowed_faults:
             raise flashkit.SafetyError('Unknown simulation fault')
         arguments.extend(['--fault', fault])
     code = invoke(arguments, images, session / 'native.log')
@@ -243,27 +247,33 @@ def battery_arguments(baseline, serial):
     return ['--android-battery', str(level), '--battery-observed-at', str(observed_at)]
 
 
-def run(serial, *, materials=None):
+def run(serial, *, materials=None, plan='crossflash-265'):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise flashkit.SafetyError('Real writes require an interactive local terminal; no noninteractive confirmation bypass')
+    if plan not in {'crossflash-265', 'upgrade-35'} or (plan == 'upgrade-35' and materials is None):
+        raise flashkit.SafetyError('A fixed compiled upgrade profile is required')
+    upgrade = plan == 'upgrade-35'
+    phrase = UPGRADE_PHRASE if upgrade else PHRASE
     validate_serial(serial)
     check = checked_build if materials is None else materials.checked_build
     snapshot = snapshot_images if materials is None else materials.snapshot_images
     invoke = native if materials is None else materials.native
     receipt = check()
+    if receipt.get('trial_plan', 'crossflash-265') != plan:
+        raise flashkit.SafetyError('Native build belongs to a different flashing plan')
     print('正在核验刷机文件并创建独立只读镜像副本；此阶段不写手机。', flush=True)
     session = new_session('live')
     images = snapshot(session)
     print('读取正常开机手机的基线；现在请保持 Android 开机、USB 调试已授权。', flush=True)
     observed_at, observed_monotonic = time.time_ns() // 1_000_000_000, time.monotonic()
-    baseline = flashkit.preflight(serial, expected=TRIAL_BASELINE)
+    baseline = materials.android_baseline(serial) if upgrade and materials is not None else flashkit.preflight(serial, expected=TRIAL_BASELINE)
     baseline.update(serial=serial, battery_observed_at=observed_at,
                     battery_observed_monotonic=observed_monotonic)
     baseline.pop('blockers', None)  # Legacy preparation gates are not trial authorization.
     (session / 'baseline.json').write_text(json.dumps(baseline, indent=2, ensure_ascii=False) + '\n')
     if not baseline['baseline_matches']:
-        raise flashkit.SafetyError('Android baseline must be stock HK FS72 .265 with sufficient battery; no writes started')
-    print('''
+        raise flashkit.SafetyError('Android baseline does not match the selected plan; no writes started')
+    notice = '''
 实际试刷，不是模拟：XQ-FS72 HK .265 -> XQ-FS54 EU/UK .265。
 功能能力留到刷后验收，双实体卡/eSIM切换及恢复成功均不保证。
 会写14个固定系统/无线固件镜像：有槽的只写A，共享super按源包更新。
@@ -279,7 +289,22 @@ def run(serial, *, materials=None):
 不自动重启、不自动恢复出厂、不Root、不解锁、不在失败后自动重试。
 尚无已验证的原HK恢复包/失败无损回退保证。应先自行备份重要数据。
 接受残余风险不代表数据必能恢复，也不保证第二实体卡一定可切回。
-''')
+'''
+    if upgrade:
+        notice = '''
+实验性实际升级：已跨刷的 HK FS72 / FS54 .265 -> FS54 EU/UK .35。
+会先写14个固定系统/无线固件镜像，最后更新 bootloader_a 到 V40。
+Bootloader 更新中断可能导致无法开机；旧 .265 和 B 槽不保证能回退。
+不主动擦写 userdata/metadata/persist/modemst/misc，不写 GPT、SPC/CustomerID。
+共享 super 会更新逻辑分区；必须确认快照为空、设备为锁定/green/V36。
+两项 boot-config 必须与固定参考一致，但不对它们发送 Write-TA。
+唯一的主机 TA 写入仍是会话标志 2:10100 的 1/0；全部成功才设置 A 槽。
+原厂 Bootloader 是由设备处理的复合包，不能据此保证其他分区每字节不变。
+本机已通过只读准备检查；尚未执行过这个 .35 升级流程。
+不保证保留数据、eSIM 或失败恢复。先独立备份；操作后果自负。
+失败不自动重试、切槽、重启或清数据。
+'''
+    print(notice)
     print('''
 现在正常关机。按住音量减，再连接USB，进入Sony Flash模式（不是蓝色Fastboot）。
 程序以USB 0fce:b00b和手机序列号为准；只允许连接一台Flash模式Sony设备。
@@ -295,20 +320,21 @@ def run(serial, *, materials=None):
             'phone_write_requested': False, 'exit_code': probe_code}, indent=2) + '\n')
         print('只读检查未通过，尚未开始写入。可断开USB正常开机；不要绕过检查。日志：', session)
         return probe_code or 2
-    if input('只读检查通过。确认上述实际写入范围，请完整输入 ' + PHRASE + '\n> ').strip() != PHRASE:
+    if input('只读检查通过。确认上述实际写入范围，请完整输入 ' + phrase + '\n> ').strip() != phrase:
         print('已取消，未执行手机写入。')
         return 2
-    (session / 'authorization.json').write_text(json.dumps({'typed_confirmation': PHRASE,
+    (session / 'authorization.json').write_text(json.dumps({'typed_confirmation': phrase, 'trial_plan': plan, 'bootloader_update': upgrade,
         'functional_goal': flashkit.POLICY['goal'], 'data_risk_accepted': True,
         'runtime_capability_prevalidation_waived_for_trial': True,
         'build_binary_sha256': receipt['binary_sha256']}, indent=2) + '\n')
     check()
-    code = invoke(['--flash', serial, PHRASE, *battery_arguments(baseline, serial)], images, session / 'native.log')
+    code = invoke(['--flash', serial, phrase, *battery_arguments(baseline, serial)], images, session / 'native.log')
     text = (session / 'native.log').read_text()
     complete = code == 0 and 'TRIAL_COMPLETE_NO_REBOOT_FUNCTIONAL_RESULT_NOT_VERIFIED' in text
     report = {'mode': 'live_trial', 'exit_code': code, 'images_completed': text.count('TRIAL_IMAGE_COMPLETE '),
               'write_sequence_complete': complete, 'functional_goal_verified': False,
-              'automatic_reboot': False, 'source_zip_sha256': flashkit.SOURCE_SHA256,
+              'automatic_reboot': False, 'trial_plan': plan,
+              'source_zip_sha256': receipt['source_zip_sha256'] if upgrade else flashkit.SOURCE_SHA256,
               'binary_sha256': receipt['binary_sha256']}
     (session / 'result.json').write_text(json.dumps(report, indent=2) + '\n')
     print('PRIVATE SESSION LOG:', session)
@@ -326,7 +352,7 @@ def main(argv=None):
     simulation = commands.add_parser('simulate')
     faults = simulation.add_mutually_exclusive_group()
     faults.add_argument('--fail-at', type=int)
-    faults.add_argument('--fault', choices=['data-fail-prefix', 'data-okay-prefix', 'super-slot-failure', 'snapshot-merging'])
+    faults.add_argument('--fault', choices=['data-fail-prefix', 'data-okay-prefix', 'super-slot-failure', 'snapshot-merging', 'commit-cancel'])
     for name in ['probe', 'run']:
         sub = commands.add_parser(name)
         sub.add_argument('--serial', required=True)
