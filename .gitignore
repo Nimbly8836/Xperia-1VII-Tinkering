@@ -30,8 +30,11 @@
 /scripts/*
 !/scripts/switch_sim.py
 !/scripts/test_switch_sim.py
+!/scripts/70-xperia-flash.rules
 /docs/*
 !/docs/verified-results.md
+!/docs/linux.md
+!/docs/firmware-71.2.A.2.35-research.md
 
 # Defense in depth: firmware, proprietary extracts, credentials and outputs.
 **/__pycache__/

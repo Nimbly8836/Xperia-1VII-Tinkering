@@ -133,7 +133,7 @@ class TrialTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(source).hexdigest(), build_trial.UPSTREAM_SHA)
         transformed = build_trial.compose(source.decode(), (trial.ROOT / 'trial_policy.c.in').read_text(),
                                           (trial.ROOT / 'trial_main.c.in').read_text())
-        process = transformed.split('static int process_sins(', 1)[1].split('/* Experimental macOS-only', 1)[0]
+        process = transformed.split('static int process_sins(', 1)[1].split('/* Experimental macOS/Linux', 1)[0]
         self.assertNotIn('update.xml', process)
         self.assertNotIn('check_in_updatexml', process)
         self.assertEqual(process.count('trial_send_command(dev, command)'), 6)
@@ -142,6 +142,10 @@ class TrialTests(unittest.TestCase):
         self.assertIn('trial_slot_answer_ok(flashfile, tmp_reply)', process)
         self.assertNotIn('int main(int argc, char *argv[])', transformed)
         self.assertNotIn('proced_ta_file(', transformed)
+        self.assertIn('#define TRIAL_LIBUSB_BACKEND 1', transformed)
+        self.assertEqual(transformed.count('#ifdef TRIAL_LIBUSB_BACKEND'), 3)
+        self.assertNotIn('libusb_clear_halt(dev, endpoint_out)', transformed)
+        self.assertIn('/* outbound: fail, do not resend */', transformed)
 
     def test_battery_handoff_requires_fresh_same_device_reading(self):
         baseline = {'baseline_matches': True, 'serial': 'TEST', 'battery_percent': 100,
@@ -237,12 +241,17 @@ class TrialTests(unittest.TestCase):
         generated = self.root / 'build/trial-writer.c'
         generated.write_text('fixture')
         receipt = {'source_zip_sha256': flashkit.SOURCE_SHA256,
+                   'host_system': trial.platform.system(), 'host_machine': trial.platform.machine(),
                    'input_sha256': {s: trial.digest(self.root / s) for s in trial.INPUTS},
                    'binary_sha256': trial.digest(binary), 'generated_sha256': trial.digest(generated)}
         rpath = self.root / 'build/receipt.json'
         rpath.write_text(json.dumps(receipt))
         with patch.object(trial, 'ROOT', self.root), patch.object(trial, 'BINARY', binary), patch.object(trial, 'RECEIPT', rpath):
             trial.checked_build()
+            with patch.object(trial.platform, 'system', return_value='OtherOS'), self.assertRaises(flashkit.SafetyError):
+                trial.checked_build()
+            with patch.object(trial.platform, 'machine', return_value='OtherCPU'), self.assertRaises(flashkit.SafetyError):
+                trial.checked_build()
             (self.root / 'trial.py').write_text('changed')
             with self.assertRaises(flashkit.SafetyError):
                 trial.checked_build()

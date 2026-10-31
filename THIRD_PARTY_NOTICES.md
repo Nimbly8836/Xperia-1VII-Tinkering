@@ -41,7 +41,7 @@ SOFTWARE.
 ## Firmware and external dependencies
 
 Sony firmware, Qualcomm/Google/Sony components extracted from firmware,
-Android platform tools, XperiFirm, libusb, compiler/SDK libraries, ax and Python
+Android platform tools, XperiFirm, libusb, OpenSSL (Linux SHA-256), compiler/SDK libraries, ax and Python
 packages are not distributed in this repository. They retain their respective
 licenses. This project's MIT license does not relicense those materials.
 

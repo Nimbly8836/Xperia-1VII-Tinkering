@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Build the experimental macOS preserve-data trial entry, without USB access."""
+"""Build the experimental macOS/Linux preserve-data trial, without USB access."""
 import hashlib
 import json
+import os
 import platform
 import shlex
 import subprocess
@@ -53,7 +54,24 @@ def compose(upstream, policy, main):
         raise RuntimeError('Unexpected USB retry structure')
     index = transfer.rfind(retry)
     transfer = transfer[:index] + transfer[index:].replace(retry, '} while (0); /* outbound: fail, do not resend */', 1)
+    # A failed outbound transfer is ambiguous: do not even clear its halt.
+    out_start = transfer.index('\t\t\tif (res == LIBUSB_ERROR_PIPE)', transfer.index('if (ep == EP_OUT)'))
+    out_end = transfer.index('\n\t\t\ttry++;', out_start)
+    transfer = transfer[:out_start] + transfer[out_end:]
     prefix = prefix[:start] + transfer + prefix[end:]
+    prefix = replace_once(prefix,
+        'if (trial_simulation) return trial_mock_transfer(ep, bytes, size);',
+        'if (trial_simulation) return trial_mock_transfer(ep, bytes, size);\n'
+        '\tif (size > INT_MAX || (ep != EP_IN && ep != EP_OUT)) return 0;')
+    # Select the same reviewed libusb backend on both hosts. Never spoof
+    # __APPLE__: the policy/main still need the real OS for crypto and stat.
+    prefix = replace_once(prefix, '#include "version.h"',
+                          '#define TRIAL_LIBUSB_BACKEND 1\n#include "version.h"')
+    prefix = replace_once(prefix, '#if !defined(_WIN32) && !defined(__APPLE__)',
+                          '#if !defined(_WIN32) && !defined(TRIAL_LIBUSB_BACKEND)')
+    if prefix.count('#ifdef __APPLE__') != 3:
+        raise RuntimeError('Unexpected upstream platform selector count')
+    prefix = prefix.replace('#ifdef __APPLE__', '#ifdef TRIAL_LIBUSB_BACKEND')
     prefix = replace_once(prefix,
         'ret_len = transfer_bulk_async(dev, ep, bytes, size, timeout, exact);',
         'ret_len = transfer_bulk_async(dev, ep, bytes, size, timeout, exact);\n'
@@ -91,9 +109,28 @@ def compose(upstream, policy, main):
     return before + '\n' + policy + '\n' + process + '\n' + main
 
 
+def compiler_command(system, generated, executable, build_dir):
+    if system not in {'Darwin', 'Linux'}:
+        raise RuntimeError('Supported build hosts: macOS and Linux')
+    packages = ['libusb-1.0'] + (['libcrypto'] if system == 'Linux' else [])
+    pkg = subprocess.run(['pkg-config', '--cflags', '--libs', *packages], check=True, capture_output=True, text=True)
+    if system == 'Darwin':
+        sdk = subprocess.run(['xcrun', '--show-sdk-path'], check=True, capture_output=True, text=True).stdout.strip()
+        compiler = ['/usr/bin/clang']
+        platform_flags = ['-isysroot', sdk]
+    else:
+        compiler = shlex.split(os.environ.get('CC', 'cc'))
+        if not compiler:
+            raise RuntimeError('CC cannot be empty')
+        platform_flags = ['-D_GNU_SOURCE=1', '-D_FILE_OFFSET_BITS=64']
+    return [*compiler, '-std=c11', '-O2', '-DHAS_STDINT_H=1', *platform_flags,
+            '-Werror=implicit-function-declaration', '-Wno-unused-function', '-Wno-deprecated-declarations',
+            '-I', str(build_dir), str(generated), '-o', str(executable), *shlex.split(pkg.stdout), '-lz', '-lexpat']
+
+
 def build():
-    if platform.system() != 'Darwin':
-        raise RuntimeError('This reviewed build is macOS only')
+    if platform.system() not in {'Darwin', 'Linux'}:
+        raise RuntimeError('Supported build hosts: macOS and Linux')
     if UPSTREAM.is_symlink() or not UPSTREAM.is_file():
         raise RuntimeError('Pinned vendored source is missing or is a symlink')
     upstream_bytes = UPSTREAM.read_bytes()
@@ -122,11 +159,7 @@ def build():
     generated = BUILD / 'trial-writer.c'
     generated.write_text(source)
     executable = BUILD / 'fs72-preserve-trial'
-    pkg = subprocess.run(['pkg-config', '--cflags', '--libs', 'libusb-1.0'], check=True, capture_output=True, text=True)
-    sdk = subprocess.run(['xcrun', '--show-sdk-path'], check=True, capture_output=True, text=True).stdout.strip()
-    command = ['/usr/bin/clang', '-std=c11', '-O2', '-DHAS_STDINT_H=1', '-isysroot', sdk,
-               '-Werror=implicit-function-declaration', '-Wno-unused-function', '-Wno-deprecated-declarations',
-               '-I', str(BUILD), str(generated), '-o', str(executable), *shlex.split(pkg.stdout), '-lz', '-lexpat']
+    command = compiler_command(platform.system(), generated, executable, BUILD)
     subprocess.run(command, check=True)
     executable.chmod(0o700)
     subprocess.run([str(executable), '--self-test'], check=True)
@@ -134,7 +167,8 @@ def build():
     (BUILD / 'compile_commands.json').write_text(json.dumps([compile_command], indent=2) + '\n')
     inputs = [UPSTREAM, ROOT / 'build_trial.py', ROOT / 'trial_policy.c.in', ROOT / 'trial_main.c.in',
               ROOT / 'flashkit.py', ROOT / 'trial.py', BUILD / 'trial_images.h']
-    receipt = {'upstream_commit': '59f12e437d29f0385eb27dcebba5158aa3f97b45',
+    receipt = {'host_system': platform.system(), 'host_machine': platform.machine(),
+               'upstream_commit': '59f12e437d29f0385eb27dcebba5158aa3f97b45',
                'upstream_sha256': UPSTREAM_SHA, 'source_zip_sha256': flashkit.SOURCE_SHA256,
                'input_sha256': {str(p.relative_to(ROOT)): digest(p) for p in inputs},
                'generated_sha256': digest(generated), 'binary_sha256': digest(executable),

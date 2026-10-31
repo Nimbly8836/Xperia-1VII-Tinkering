@@ -10,6 +10,8 @@
 
 ## 风险与适用范围
 
+**新版 `.35` 状态：**已核查 Sony 发布的 `71.2.A.2.35`，官方元数据为 Android 17，boot delivery 为 V40。此前跨刷后的 FS54 `.265` → `.35` 涉及跨代升级，**不能直接沿用本页的 14 镜像/V36 策略**。两套新版原始包已下载校验，并新增 `audit_upgrade.py` 离线审查入口；新版尚未开放实际写入，见[新版研究与缺失证据](docs/firmware-71.2.A.2.35-research.md)。旧 `.265` 的版本/哈希/Bootloader 限制仍保留，SIM 切换也未盲目放行 `.35`。
+
 - 真实刷写入口是 `flash-kit/trial.py run`，会写手机。`simulate` 才是无 USB 模拟；`flashkit.py` 仅负责离线准备/校验。
 - 刷前基线限定为 **HK FS72、SKU `c001526`、`71.1.A.2.265 release-keys`、Bootloader locked、Verified Boot green、DSDS、电量至少 60%**。从 `.248` 升到原厂 `.265` 不在本工具的实现范围内。
 - 仅为固定固件和已研究组合设计；**不要更改哈希、版本、槽位或身份检查以适配其他设备**。
@@ -21,7 +23,8 @@
 
 | 路径 | 用途 |
 |---|---|
-| [`flash-kit/`](flash-kit/README.md) | 固定源包校验、14 镜像准备、macOS 原生受限刷写器及测试 |
+| [`flash-kit/`](flash-kit/README.md) | 固定源包校验、14 镜像准备、macOS/Linux 原生受限刷写器及测试 |
+| [`flash-kit/audit_upgrade.py`](flash-kit/audit_upgrade.py) | `.265` → `.35` 固定包离线比较；不访问手机，不开放新版写入 |
 | [`scripts/switch_sim.py`](scripts/switch_sim.py) | SIM 类型切换；默认仅打印命令，需 `--execute` 和交互确认 |
 | [`firmware-downloads/`](firmware-downloads/README.md) | 原有电脑端分块下载脚本，依赖自行准备的本地 metadata；不是开箱即用下载器 |
 | [`docs/verified-results.md`](docs/verified-results.md) | 脱敏后的实机结果与未验证事项 |
@@ -74,16 +77,19 @@ SIM_TYPE_UPDATE_ACTION（定向 com.qti.phone）
 
 不能由这一个案例断言“原厂 FS72 一定也能直接切换”，也不能证明跨刷是访问 eUICC 的唯一必要条件。
 
-## 操作一：准备与刷机（macOS）
+## 操作一：准备与刷机（macOS / Linux）
 
 以下命令均从仓库根目录执行。**先读完整节与[详细流程](flash-kit/TRIAL.md)，不要整段盲目粘贴。**
 
 ### 1. 环境
 
-- macOS + APFS：执行器使用 `/bin/cp -c` 创建独立 Copy-on-Write 镜像快照，不支持直接照搬到 Linux/Windows 或非 APFS 文件系统。
-- Python 3.10+；Xcode Command Line Tools 的 `clang`/`xcrun`。
+- macOS + APFS：使用 `/bin/cp -c` 创建独立 Copy-on-Write 镜像快照。
+- **Linux**：使用独占创建的全量独立副本，不要求 APFS/reflink；已在 Debian 12 arm64 验证编译与完整无 USB 模拟，**未做 Linux 真机刷写**。依赖、空间和 USB 权限见 [Linux 指南](docs/linux.md)。Windows 暂不支持。
+- Python 3.10+；macOS 需要 Xcode Command Line Tools，Linux 需要 GCC/Clang、OpenSSL libcrypto、zlib、expat 开发包。
 - `pkg-config`、`libusb`、Android Platform Tools（`adb`）。
-- 充足磁盘空间：源 ZIP 约 4.2 GiB，候选镜像约 5 GiB，并须保留额外空间与 APFS 写时复制空间。
+- 充足磁盘空间：源 ZIP 约 4.2 GiB，候选镜像约 5 GiB；Linux 每次会话另复制约 5 GiB，并须保留至少 3 GiB 余量。不要将副本放入容量不足的 `/tmp` tmpfs。
+
+macOS 安装示例（Linux 见上方指南）：
 
 ```bash
 xcode-select --install  # 已安装时跳过
@@ -124,7 +130,7 @@ python3 flash-kit/trial.py simulate
 
 `prepare` 不覆盖已有候选目录；再次使用时执行 `verify`，不要混入其他文件。目录名中的 `NOT-APPROVED`、准备器的 `flash_allowed: false` 是“候选本身不授权刷写”的边界，不能通过编辑 JSON 开启。`flashkit.py execute` 始终拒绝；实际刷写另由 `trial.py run` 严格检查并征求确认。
 
-修改构建输入后必须重新构建和测试。无 USB 模拟仍需真实固件和本地构建；仅单元测试无需固件。不要向候选目录放入裸 Newflasher 运行。
+修改构建输入后必须重新构建和测试。无 USB 模拟仍需真实固件和本地构建；单元测试无需固件。安装原生依赖后，可用 `XPERIA_NATIVE_TESTS=1 python3 -m unittest discover -s flash-kit -p 'test_*.py' -v` 额外运行带 USB 拒绝桩的原生测试。不要向候选目录放入裸 Newflasher 运行。
 
 ### 4. 实际写入（高风险，手动单独执行）
 

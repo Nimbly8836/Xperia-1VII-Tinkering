@@ -9,8 +9,11 @@ import argparse
 import contextlib
 import json
 import os
+import platform
 import re
+import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -36,6 +39,9 @@ def checked_build():
     receipt = flashkit.read_json(RECEIPT)
     if not isinstance(receipt, dict) or receipt.get('source_zip_sha256') != flashkit.SOURCE_SHA256:
         raise flashkit.SafetyError('Build receipt does not match fixed firmware')
+    if (receipt.get('host_system') != platform.system()
+            or receipt.get('host_machine') != platform.machine()):
+        raise flashkit.SafetyError('Build belongs to another host OS/architecture; rebuild locally')
     hashes = receipt.get('input_sha256')
     if not isinstance(hashes, dict) or set(hashes) != INPUTS:
         raise flashkit.SafetyError('Build input set mismatch')
@@ -57,20 +63,57 @@ def new_session(mode):
     return path
 
 
+def copy_image_snapshot(original, target, entry):
+    system = platform.system()
+    if system not in {'Darwin', 'Linux'}:
+        raise flashkit.SafetyError('Image snapshots support macOS/APFS and Linux only')
+    if os.path.lexists(target):
+        raise flashkit.SafetyError('Snapshot destination already exists; refusing replacement')
+    descriptor = os.open(original, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, 'rb') as source:
+        initial = os.fstat(source.fileno())
+        if not stat.S_ISREG(initial.st_mode) or initial.st_size != entry['bytes']:
+            raise flashkit.SafetyError('Snapshot source is not the expected regular file')
+        signature = flashkit.file_signature(initial)
+        flashkit.assert_source_stable(original, source, signature)
+        if system == 'Darwin':
+            # APFS clone: independent inode/COW storage, never a hard link.
+            subprocess.run(['/bin/cp', '-c', str(original), str(target)], check=True)
+        else:
+            # Portable Linux copy, including ext4: no reflink dependency or
+            # hard links. Budget the entire snapshot before copying anything.
+            output = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(output, 'wb') as destination:
+                for block in iter(lambda: source.read(flashkit.CHUNK_BYTES), b''):
+                    if shutil.disk_usage(target.parent).free < flashkit.RESERVE_BYTES + len(block):
+                        raise flashkit.SafetyError('Snapshot disk reserve reached; no native operation started')
+                    destination.write(block)
+                destination.flush()
+                os.fsync(destination.fileno())
+        flashkit.assert_source_stable(original, source, signature)
+        snapshot = target.lstat()
+        if (not stat.S_ISREG(snapshot.st_mode)
+                or (snapshot.st_dev, snapshot.st_ino) == (initial.st_dev, initial.st_ino)
+                or snapshot.st_size != entry['bytes'] or digest(target) != entry['sha256']):
+            raise flashkit.SafetyError('Snapshot mismatch; no native operation started')
+        target.chmod(0o400)
+
+
 def snapshot_images(session):
+    if platform.system() not in {'Darwin', 'Linux'}:
+        raise flashkit.SafetyError('Unsupported host; no native operation started')
     # Recheck against the pinned original, not just an editable local manifest.
     flashkit.verify()
     manifest = flashkit.read_json(flashkit.CANDIDATE / 'manifest.json')
+    if platform.system() == 'Linux':
+        required = sum(entry['bytes'] for entry in manifest['images']) + flashkit.RESERVE_BYTES
+        if shutil.disk_usage(session).free < required:
+            raise flashkit.SafetyError('Insufficient space for independent Linux image copies plus reserve')
     images = session / 'images'
     images.mkdir(mode=0o700)
     for entry in manifest['images']:
         original = flashkit.CANDIDATE / 'images' / entry['name']
-        target = images / entry['name']
-        # APFS clone is a separate inode/COW snapshot; do not use hard links.
-        subprocess.run(['/bin/cp', '-c', str(original), str(target)], check=True)
-        if target.is_symlink() or target.stat().st_ino == original.stat().st_ino or target.stat().st_size != entry['bytes'] or digest(target) != entry['sha256']:
-            raise flashkit.SafetyError('Snapshot mismatch; no native operation started')
-        target.chmod(0o400)
+        copy_image_snapshot(original, images / entry['name'], entry)
     (session / 'input-manifest.json').write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + '\n')
     return images
 
@@ -202,7 +245,7 @@ def run(serial):
         raise flashkit.SafetyError('Real writes require an interactive local terminal; no noninteractive confirmation bypass')
     validate_serial(serial)
     receipt = checked_build()
-    print('正在核验固定源包并创建只读 APFS 快照；此阶段不写手机。', flush=True)
+    print('正在核验固定源包并创建独立只读镜像副本；此阶段不写手机。', flush=True)
     session = new_session('live')
     images = snapshot_images(session)
     print('读取正常开机手机的基线；现在请保持 Android 开机、USB 调试已授权。', flush=True)

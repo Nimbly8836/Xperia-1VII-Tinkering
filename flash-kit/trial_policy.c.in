@@ -1,5 +1,11 @@
 /* Local experimental restrictions around upstream SIN transport. */
+#ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
+#elif defined(__linux__)
+#include <openssl/evp.h>
+#else
+#error Unsupported trial host
+#endif
 #include <stdint.h>
 #include <time.h>
 #include "trial_images.h"

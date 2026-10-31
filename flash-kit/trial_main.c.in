@@ -1,4 +1,4 @@
-/* Experimental macOS-only app-firmware trial; upstream main is not compiled. */
+/* Experimental macOS/Linux app-firmware trial; upstream main is not compiled. */
 #include <sys/statvfs.h>
 #include <signal.h>
 
@@ -6,22 +6,50 @@ static volatile sig_atomic_t trial_stop_requested = 0;
 static void trial_request_stop(int number) { (void)number; trial_stop_requested = 1; }
 
 static bool trial_hash_file(FILE *file, const char *wanted, unsigned long long expected_size) {
-    unsigned char buffer[1024*1024], digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_CTX hash; CC_SHA256_Init(&hash); unsigned long long total=0;
+    unsigned char buffer[1024*1024], digest[32];
+    unsigned long long total=0; bool valid=true;
+#ifdef __APPLE__
+    CC_SHA256_CTX hash;
+    if (!CC_SHA256_Init(&hash)) return false;
+#else
+    EVP_MD_CTX *hash=EVP_MD_CTX_new();
+    if (!hash) return false;
+    if (EVP_DigestInit_ex(hash,EVP_sha256(),NULL)!=1) {EVP_MD_CTX_free(hash);return false;}
+#endif
     size_t count;
     while ((count=fread(buffer,1,sizeof(buffer),file))>0) {
-        CC_SHA256_Update(&hash,buffer,(CC_LONG)count); total+=count;
+#ifdef __APPLE__
+        if (!CC_SHA256_Update(&hash,buffer,(CC_LONG)count)) {valid=false;break;}
+#else
+        if (EVP_DigestUpdate(hash,buffer,count)!=1) {valid=false;break;}
+#endif
+        total+=count;
     }
-    if (ferror(file) || total!=expected_size) return false;
-    CC_SHA256_Final(digest,&hash);
+    if (ferror(file) || total!=expected_size) valid=false;
+#ifdef __APPLE__
+    if (!CC_SHA256_Final(digest,&hash)) valid=false;
+#else
+    unsigned length=0;
+    if (EVP_DigestFinal_ex(hash,digest,&length)!=1 || length!=sizeof(digest)) valid=false;
+    EVP_MD_CTX_free(hash);
+#endif
+    if (!valid) return false;
     char text[65]; for (unsigned i=0;i<32;i++) snprintf(text+2*i,3,"%02x",digest[i]);
     rewind(file); return strcmp(text,wanted)==0;
 }
 
+#ifdef __APPLE__
+#define TRIAL_MTIME st_mtimespec
+#define TRIAL_CTIME st_ctimespec
+#else
+#define TRIAL_MTIME st_mtim
+#define TRIAL_CTIME st_ctim
+#endif
+
 static bool trial_same_file(const struct stat *a,const struct stat *b) {
     return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_size==b->st_size &&
-        a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec &&
-        a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec;
+        a->TRIAL_MTIME.tv_sec==b->TRIAL_MTIME.tv_sec && a->TRIAL_MTIME.tv_nsec==b->TRIAL_MTIME.tv_nsec &&
+        a->TRIAL_CTIME.tv_sec==b->TRIAL_CTIME.tv_sec && a->TRIAL_CTIME.tv_nsec==b->TRIAL_CTIME.tv_nsec;
 }
 
 static bool trial_directory_ok(void) {
@@ -43,6 +71,7 @@ static bool trial_space_ok(void) {
 
 static HANDLE trial_open_usb(int *claimed) {
     *claimed=-1;
+    if (trial_simulation) {fprintf(stderr,"TRIAL_SIMULATION_USB_REFUSED\n");return NULL;}
     if (libusb_init(NULL)!=0) return NULL;
     libusb_device **list=NULL; ssize_t count=libusb_get_device_list(NULL,&list);
     libusb_device *selected=NULL; unsigned matches=0;
