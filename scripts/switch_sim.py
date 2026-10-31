@@ -65,10 +65,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     command = broadcast_command(args.serial, args.mode)
     print('Request:', shlex.join(command))
-    print('Warning: switching interrupts service. Only eSIM activation was verified on one device.')
+    print('Warning: switching interrupts service. The owner reports successful eSIM/dual-physical-SIM round trips on one device.')
+    print('This Python wrapper has mock-test coverage; that feedback does not establish a real-device test of this wrapper.')
     print('This cannot verify HAL support or current MEP/slot mapping; inspect those before proceeding.')
     if args.mode == 'physical':
-        print('Physical return is UNVERIFIED. Confirm the current slot/MEP mapping first; do not blindly switch dual-eSIM setups.')
+        print('Confirm the current slot/MEP mapping first; one verified device does not establish safety for arbitrary dual-eSIM setups.')
     if not args.execute:
         print('PREVIEW ONLY: no ADB command was executed. Add --execute only after reading README.')
         return 0

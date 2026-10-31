@@ -4,7 +4,7 @@
 
 港版 **Xperia 1 VII XQ-FS72** 在不解锁 Bootloader、不 Root、不主动清除用户数据的前提下，使用固定的 **FS54 EU/UK `71.1.A.2.265`** 镜像，并通过系统 SIM 类型入口访问内置 eSIM 的实验记录和工具。
 
-> **本机已成功：刷机后正常使用、用户确认数据保留；内置 eUICC 已识别，eSIM 套餐已激活并联网。** 这是一个实机案例，不是所有 FS72、所有固件或所有运营商的兼容性保证。**切回双实体卡、重启保持、OTA、完整通话/短信/VoLTE/VoWiFi 尚未验收。** 详见[验证范围](docs/verified-results.md)。
+> **本机已成功：刷机后正常使用、数据保留、内置 eSIM 激活联网；用户进一步确认，可在“实体卡 + eSIM”和“双实体 SIM”之间自由往返切换，并可通过 Termux 脚本快速切换。** 这是一个实机案例，不是所有 FS72、所有固件或所有运营商的兼容性保证。**重启保持、OTA、完整通话/短信/VoLTE/VoWiFi 尚未验收。** 详见[验证范围](docs/verified-results.md)。
 >
 > 已经刷好且 eSIM 正常的手机，无需为了使用本仓库再刷一次或再次切卡。
 
@@ -153,7 +153,7 @@ FS72_TO_FS54_265_A_KEEP_DATA_TRIAL
 
 ## 操作二：刷机后切换 SIM / eSIM
 
-**新封装脚本已做 mock 测试，未为发布而再次操作实机。** 历史上实测成功的是相同的 eSIM 广播请求；实体卡回切仅有代码路径证据，不能当作实测成功。
+**用户已在实机验证“实体卡 + eSIM ↔ 双实体 SIM”往返切换，并确认 Termux 脚本可快速切换。** 本仓库的 Python 封装已做 mock 测试，但本次反馈没有指定使用该封装，不能将其写成封装脚本的实机验收；Termux 的实际脚本和权限配置也尚未收录。
 
 要求正常 Android、USB 调试已授权、明确的 ADB 序列号。脚本会限制型号/版本/SKU、locked/green/DSDS 和 Qti 包存在，但**这些属性不是 HAL 能力或 MEP 映射检查**。先确认当前槽位映射；不适用时停止，不绕过检查。
 
@@ -169,13 +169,13 @@ python3 scripts/switch_sim.py esim --serial YOUR_ADB_SERIAL --execute
 
 确认短语：`SWITCH_TO_ESIM_MAPPING_CHECKED`。若已在 eSIM 模式且工作正常，不要重复执行。切换后到系统设置检查 EID/“添加 eSIM”，按运营商正规流程添加套餐，并实际验证联网。脚本不安装应用、不获取或上传 EID/ICCID、不替你下载套餐。
 
-### 切回实体卡（尚未实机验收）
+### 切回双实体卡（用户已实机验证往返）
 
 先核对实体卡已插好，以及当前逻辑槽、物理槽和 MEP 端口映射。双 eSIM 同占一个物理 eUICC 或无法确认映射时，**不要盲目执行**。只读诊断可在本机查看 `adb -s YOUR_ADB_SERIAL shell dumpsys phone`，但其输出包含敏感信息，不要原样上传；不能判读就停止。
 
 ```bash
 python3 scripts/switch_sim.py physical --serial YOUR_ADB_SERIAL
-# 确认映射、接受未经实机验收的风险后才执行：
+# 确认当前映射并接受切换中断通信的风险后才执行：
 python3 scripts/switch_sim.py physical --serial YOUR_ADB_SERIAL --execute
 ```
 
@@ -195,6 +195,12 @@ adb -s YOUR_ADB_SERIAL shell am broadcast --user 0 --receiver-foreground \
 `1` 请求 eSIM，`0` 请求 physical；`--receiver-permission` 限制接收者应持有的权限，**不是给 adb shell 授权、改 UID 或绕过权限检查**。若系统拒绝发送或处理就停止，不尝试提权。不要替换为名称相似的 `com.android.action.enable_esim`，那是另一条 NTN profile 路径。
 
 `Broadcast completed` 仅表示广播调用返回，不证明 HAL 接受、EID 出现或业务可用。超时/错误时状态可能未知，脚本不会自动重试、重启或回切。
+
+### Termux 快速切换（用户已验证，脚本待收录）
+
+用户确认可以在手机上通过 Termux 脚本快速切换，无需把实机能力继续标为“尚未验证”。但目前尚未收到其实际脚本、调用方式及权限配置，因此这里不提供猜测的 Termux 一键命令。
+
+**普通 Termux 应用进程不等同于 ADB shell。** 是否通过本机无线 ADB、Shizuku/rish、root 或其他方式执行，应以实际脚本为准；不能直接删掉电脑端命令的 `adb shell` 前缀就声称等价可用。收录前需核对脱敏脚本和执行条件，不记录配对码、私钥、激活码或设备唯一标识。此反馈也不代表 `.35` 固件、重启保持或 OTA 已验证。
 
 ## 公开与隐私
 
