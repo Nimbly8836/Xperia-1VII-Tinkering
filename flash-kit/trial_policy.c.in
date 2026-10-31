@@ -42,7 +42,8 @@ enum trial_fault { FAULT_NONE, FAULT_DATA_FAIL_PREFIX, FAULT_DATA_OKAY_PREFIX, F
                    FAULT_BATTERY_LOW, FAULT_BATTERY_MALFORMED,
                    FAULT_BATTERY_FAKE_OKAY, FAULT_BATTERY_NUL_SUFFIX,
                    FAULT_TA_MISMATCH, FAULT_TA_SIZE, FAULT_TA_ACK, FAULT_BOOTLOADER_SLOT, FAULT_BOOTLOADER_NO_SLOT,
-                   FAULT_TA_SEPARATE_ACK, FAULT_TA_HEADER_NUL, FAULT_TA_HEADER_JUNK };
+                   FAULT_TA_SEPARATE_ACK, FAULT_TA_HEADER_NUL, FAULT_TA_HEADER_JUNK,
+                   FAULT_PRODUCT_FS54, FAULT_PRODUCT_FS72 };
 static enum trial_fault trial_fault = FAULT_NONE;
 static char trial_mock_reply[1024];
 static unsigned trial_mock_root_stage = 0;
@@ -195,7 +196,8 @@ static unsigned long trial_mock_transfer(int ep, char *bytes, unsigned long size
         trial_mock_root_stage=1;
     } else if (strncmp(command, "getvar:", 7) == 0) {
         const char *key = command + 7; const char *value = NULL;
-        if (!strcmp(key,"product")) value="XQ-FS72";
+        if (!strcmp(key,"product")) value=trial_fault==FAULT_PRODUCT_FS54?"XQ-FS54":
+            trial_fault==FAULT_PRODUCT_FS72?"XQ-FS72":trial_upgrade_probe?"XQ-FS54":"XQ-FS72";
         else if (!strcmp(key,"serialno")) value="SIMULATION_ONLY";
         else if (!strcmp(key,"version-bootloader")) value="8750-0001_X_Boot_SM8750_LA1.0_V_36";
         else if (!strcmp(key,"secure")) value="yes";
@@ -322,13 +324,14 @@ static bool trial_battery_ready_to_write(void) {
 
 static bool trial_device_check(HANDLE device, const char *expected_serial) {
     trial_battery_fallback_used=false;
+    const char *expected_product=trial_upgrade_probe?"XQ-FS54":"XQ-FS72";
     char p[64],s[128],loader[128],root[128],secured[32],default_sec[32],slots[8],active[8],maxdl[32],sector[32],battery[32],snapshot[32];
     if (!trial_get(device,"product",p,sizeof(p)) || !trial_get(device,"serialno",s,sizeof(s)) ||
         !trial_get(device,"version-bootloader",loader,sizeof(loader)) || !trial_read_root_hash(device,root,sizeof(root)) ||
         !trial_get(device,"secure",secured,sizeof(secured)) || !trial_get(device,"Default-security",default_sec,sizeof(default_sec)) ||
         !trial_get(device,"slot-count",slots,sizeof(slots)) || !trial_get(device,"current-slot",active,sizeof(active)) ||
         !trial_get(device,"max-download-size",maxdl,sizeof(maxdl)) || !trial_get(device,"Sector-size",sector,sizeof(sector))) return false;
-    if (strcmp(p,"XQ-FS72") || strcmp(s,expected_serial)) {
+    if (strcmp(p,expected_product) || strcmp(s,expected_serial)) {
         fprintf(stderr,"TRIAL_IDENTITY_REFUSED: battery baseline must belong to this device.\n");return false;
     }
     bool battery_ok=trial_get(device,"Battery",battery,sizeof(battery));
@@ -348,7 +351,7 @@ static bool trial_device_check(HANDLE device, const char *expected_serial) {
     char snapshot_normalized[32]; trial_normalize(snapshot,snapshot_normalized,sizeof(snapshot_normalized));
     if (strcmp(snapshot_normalized,"NONE")) { fprintf(stderr,"TRIAL_SNAPSHOT_NOT_IDLE: do not overwrite super during an OTA snapshot/merge.\n");return false; }
     unsigned long download_size,sector_bytes,charge;
-    if (strcmp(p,"XQ-FS72") || strcmp(s,expected_serial) || strcmp(normalized,trial_loader_normalized) ||
+    if (strcmp(p,expected_product) || strcmp(s,expected_serial) || strcmp(normalized,trial_loader_normalized) ||
         strcmp(hash_normalized,trial_root_hash) || strcmp(secured,"yes") || strcmp(default_sec,"ON") ||
         strcmp(slots,"2") || (strcmp(active,"a") && strcmp(active,"b")) ||
         !trial_uint(maxdl,&download_size) || download_size<TRIAL_MAX_MEMBER || download_size>1024UL*1024*1024 ||

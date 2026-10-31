@@ -166,6 +166,13 @@ static bool trial_upgrade_probe_self_test(void) {
     trial_stop_requested=1;
     if (trial_upgrade_checks(NULL)) return false;
     trial_stop_requested=0;
+    trial_fault=FAULT_PRODUCT_FS72;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return false;
+    trial_fault=FAULT_PRODUCT_FS54;
+    if (!trial_device_check(NULL,"SIMULATION_ONLY")) return false;
+    trial_upgrade_probe=false;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return false; /* Do not widen the .265 writer. */
+    trial_upgrade_probe=true;trial_fault=FAULT_NONE;
     if (!trial_upgrade_checks(NULL)) return false;
     const enum trial_fault valid_replies[]={FAULT_BOOTLOADER_NO_SLOT,FAULT_TA_SEPARATE_ACK,FAULT_TA_HEADER_NUL};
     for (unsigned i=0;i<sizeof(valid_replies)/sizeof(valid_replies[0]);i++) {
