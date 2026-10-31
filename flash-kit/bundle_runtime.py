@@ -170,13 +170,16 @@ class PrebuiltBundle:
 def select_device(wanted=None):
     if shutil.which('adb') is None:
         raise flashkit.SafetyError('ADB is not installed. Install Android Platform Tools first')
-    result = subprocess.run(['adb', 'devices'], capture_output=True, text=True, timeout=20)
+    result = subprocess.run(['adb', 'devices', '-l'], capture_output=True, text=True, timeout=20)
     rows = result.stdout.splitlines()
     if result.returncode or not rows or rows[0].strip() != 'List of devices attached':
         raise flashkit.SafetyError('Cannot list ADB devices; check the USB connection')
     devices = [row.split() for row in rows[1:] if row.strip()]
-    if len(devices) != 1 or len(devices[0]) != 2 or devices[0][1] != 'device':
-        raise flashkit.SafetyError('Connect exactly one phone, unlock it and authorize USB debugging')
+    # Wireless/mDNS identifiers are not the Flash-mode hardware serial. Keep
+    # exactly one physical USB transport, even if wireless ADB is also active.
+    devices = [row for row in devices if len(row) >= 2 and any(field.startswith('usb:') for field in row[2:])]
+    if len(devices) != 1 or devices[0][1] != 'device':
+        raise flashkit.SafetyError('Connect exactly one phone by USB cable and authorize USB debugging; wireless ADB is not sufficient')
     serial = devices[0][0]
     trial.validate_serial(serial)
     if wanted is not None and wanted != serial:

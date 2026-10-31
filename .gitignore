@@ -43,6 +43,10 @@
 !/docs/linux.md
 !/docs/distribution.md
 !/docs/firmware-71.2.A.2.35-research.md
+!/docs/upgrade-preparation.md
+!/docs/upgrade-boot-findings.md
+!/docs/upgrade-official-path.md
+!/docs/upgrade-esim-findings.md
 
 # Defense in depth: firmware, proprietary extracts, credentials and outputs.
 **/__pycache__/

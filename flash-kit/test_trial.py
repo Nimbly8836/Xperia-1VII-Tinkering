@@ -82,7 +82,7 @@ class TrialTests(unittest.TestCase):
             trial.run('TEST')
 
     def test_invalid_serial(self):
-        for value in ['a;reboot', 'a\nb', '', 'a/b', 'x' * 101]:
+        for value in ['a;reboot', 'a\nb', '', 'a/b', 'x' * 101, 'adb-TEST-token._adb-tls-connect._tcp']:
             with self.assertRaises(flashkit.SafetyError):
                 trial.validate_serial(value)
 

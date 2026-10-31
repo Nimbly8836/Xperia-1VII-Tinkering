@@ -99,6 +99,7 @@ class NativeTests(unittest.TestCase):
             result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn('NATIVE_PORTABILITY_TESTS_OK_NO_USB', result.stdout)
+            self.assertIn('UPGRADE_READONLY_SELF_TEST_OK_NO_USB', result.stdout)
             self.assertNotIn('UNEXPECTED_USB_INIT', result.stderr)
 
 

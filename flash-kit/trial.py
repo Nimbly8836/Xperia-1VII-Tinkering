@@ -214,7 +214,7 @@ def simulate(fail_at=None, fault=None, *, materials=None):
 
 
 def validate_serial(serial):
-    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', serial):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,100}', serial) or '._tcp' in serial:
         raise flashkit.SafetyError('Invalid explicit USB serial')
 
 

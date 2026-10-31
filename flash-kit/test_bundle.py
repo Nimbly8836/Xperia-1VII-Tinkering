@@ -268,15 +268,23 @@ class BundleTests(unittest.TestCase):
 
 class DeviceSelectionTests(unittest.TestCase):
     def test_exactly_one_authorized_usb_device(self):
-        with patch.object(bundle_runtime.shutil, 'which', return_value='/fake/adb'), patch.object(bundle_runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'List of devices attached\nTEST\tdevice\n', '')):
+        with patch.object(bundle_runtime.shutil, 'which', return_value='/fake/adb'), patch.object(bundle_runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'List of devices attached\nTEST\tdevice usb:1-2 transport_id:1\n', '')):
             self.assertEqual(bundle_runtime.select_device(), 'TEST')
             with self.assertRaises(flashkit.SafetyError):
                 bundle_runtime.select_device('OTHER')
 
     def test_empty_multiple_offline_unauthorized_and_tcp_devices_are_rejected(self):
-        for rows in ['', 'TEST\tunauthorized', 'TEST\toffline', 'ONE\tdevice\nTWO\tdevice', 'localhost:5555\tdevice']:
+        for rows in ['', 'TEST\tunauthorized usb:1-2', 'TEST\toffline usb:1-2',
+                     'ONE\tdevice usb:1-2\nTWO\tdevice usb:1-3', 'localhost:5555\tdevice',
+                     'adb-TEST-example._adb-tls-connect._tcp\tdevice transport_id:1']:
             with patch.object(bundle_runtime.shutil, 'which', return_value='/fake/adb'), patch.object(bundle_runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, 'List of devices attached\n' + rows + '\n', '')), self.assertRaises(flashkit.SafetyError):
                 bundle_runtime.select_device()
+
+    def test_wireless_duplicate_does_not_replace_usb_hardware_serial(self):
+        output = 'List of devices attached\nadb-TEST-example._adb-tls-connect._tcp\tdevice transport_id:1\nTEST\tdevice usb:1-2 transport_id:2\n'
+        with patch.object(bundle_runtime.shutil, 'which', return_value='/fake/adb'), patch.object(bundle_runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, output, '')) as run:
+            self.assertEqual(bundle_runtime.select_device(), 'TEST')
+        self.assertEqual(run.call_args.args[0], ['adb', 'devices', '-l'])
 
     def test_missing_adb_never_starts_a_process(self):
         with patch.object(bundle_runtime.shutil, 'which', return_value=None), patch.object(bundle_runtime.subprocess, 'run', side_effect=AssertionError('no subprocess')), self.assertRaises(flashkit.SafetyError):
