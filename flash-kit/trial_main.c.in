@@ -1,0 +1,273 @@
+/* Experimental macOS-only app-firmware trial; upstream main is not compiled. */
+#include <sys/statvfs.h>
+#include <signal.h>
+
+static volatile sig_atomic_t trial_stop_requested = 0;
+static void trial_request_stop(int number) { (void)number; trial_stop_requested = 1; }
+
+static bool trial_hash_file(FILE *file, const char *wanted, unsigned long long expected_size) {
+    unsigned char buffer[1024*1024], digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256_CTX hash; CC_SHA256_Init(&hash); unsigned long long total=0;
+    size_t count;
+    while ((count=fread(buffer,1,sizeof(buffer),file))>0) {
+        CC_SHA256_Update(&hash,buffer,(CC_LONG)count); total+=count;
+    }
+    if (ferror(file) || total!=expected_size) return false;
+    CC_SHA256_Final(digest,&hash);
+    char text[65]; for (unsigned i=0;i<32;i++) snprintf(text+2*i,3,"%02x",digest[i]);
+    rewind(file); return strcmp(text,wanted)==0;
+}
+
+static bool trial_same_file(const struct stat *a,const struct stat *b) {
+    return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_size==b->st_size &&
+        a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec &&
+        a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec;
+}
+
+static bool trial_directory_ok(void) {
+    DIR *directory=opendir("."); if (!directory) return false;
+    unsigned found=0; struct dirent *entry; bool valid=true;
+    while ((entry=readdir(directory))) {
+        if (!strcmp(entry->d_name,".") || !strcmp(entry->d_name,"..")) continue;
+        bool match=false;
+        for (unsigned i=0;i<TRIAL_IMAGE_COUNT;i++) if (!strcmp(entry->d_name,trial_images[i].name)) {match=true;found++;break;}
+        if (!match) {valid=false;break;}
+    }
+    closedir(directory); return valid && found==TRIAL_IMAGE_COUNT;
+}
+
+static bool trial_space_ok(void) {
+    struct statvfs info;
+    return statvfs(".",&info)==0 && (unsigned long long)info.f_bavail*info.f_frsize>=1024ULL*1024*1024;
+}
+
+static HANDLE trial_open_usb(int *claimed) {
+    *claimed=-1;
+    if (libusb_init(NULL)!=0) return NULL;
+    libusb_device **list=NULL; ssize_t count=libusb_get_device_list(NULL,&list);
+    libusb_device *selected=NULL; unsigned matches=0;
+    for (ssize_t i=0;i<count;i++) {
+        struct libusb_device_descriptor descriptor;
+        if (!libusb_get_device_descriptor(list[i],&descriptor) && descriptor.idVendor==0x0fce && descriptor.idProduct==0xb00b) {selected=list[i];matches++;}
+    }
+    HANDLE device=NULL;
+    if (matches!=1 || !selected || libusb_open(selected,&device)!=0) {
+        fprintf(stderr,"TRIAL_USB_REFUSED: exactly one accessible Sony Flash-mode 0fce:b00b device required.\n");
+        if (list) libusb_free_device_list(list,1);
+        libusb_exit(NULL); return NULL;
+    }
+    struct libusb_config_descriptor *config=NULL;
+    if (libusb_get_config_descriptor(selected,0,&config)!=0) goto fail;
+    int found=0, interface_id=-1, alternate=0; unsigned char input=0,output=0;
+    for (unsigned i=0;i<config->bNumInterfaces;i++) {
+        for (int j=0;j<config->interface[i].num_altsetting;j++) {
+            const struct libusb_interface_descriptor *a=&config->interface[i].altsetting[j];
+            if (a->bNumEndpoints!=2) continue;
+            unsigned char in=0,out=0;
+            for (unsigned k=0;k<2;k++) {
+                const struct libusb_endpoint_descriptor *e=&a->endpoint[k];
+                if ((e->bmAttributes&LIBUSB_TRANSFER_TYPE_MASK)!=LIBUSB_TRANSFER_TYPE_BULK) continue;
+                if (e->bEndpointAddress&LIBUSB_ENDPOINT_IN) in=e->bEndpointAddress; else out=e->bEndpointAddress;
+            }
+            if (in && out) {found++;interface_id=a->bInterfaceNumber;alternate=a->bAlternateSetting;input=in;output=out;}
+        }
+    }
+    int wanted_config=config->bConfigurationValue, current_config=0;
+    libusb_free_config_descriptor(config); config=NULL;
+    if (found!=1 || libusb_get_configuration(device,&current_config)!=0) goto fail;
+    if (current_config!=wanted_config && libusb_set_configuration(device,wanted_config)!=0) goto fail;
+    if (libusb_claim_interface(device,interface_id)!=0) goto fail;
+    *claimed=interface_id;
+    if (alternate && libusb_set_interface_alt_setting(device,interface_id,alternate)!=0) goto fail;
+    endpoint_in=input; endpoint_out=output;
+    libusb_free_device_list(list,1); return device;
+fail:
+    if (config) libusb_free_config_descriptor(config);
+    if (*claimed>=0) libusb_release_interface(device,*claimed);
+    libusb_close(device); libusb_free_device_list(list,1); libusb_exit(NULL); *claimed=-1;
+    fprintf(stderr,"TRIAL_USB_REFUSED: cannot claim the expected bulk interface; no driver detachment attempted.\n");
+    return NULL;
+}
+
+static bool trial_battery_options(int count,char **values) {
+    if (count==0) return true;
+    if ((count!=4 && count!=5) || strcmp(values[0],"--android-battery") || strcmp(values[2],"--battery-observed-at") ||
+        (count==5 && strcmp(values[4],"--accept-recorded-battery"))) return false;
+    unsigned long level,observed_at;
+    if (!trial_uint(values[1],&level) || level<60 || level>100 ||
+        !trial_uint(values[3],&observed_at)) return false;
+    trial_android_battery=(unsigned)level;trial_battery_observed_at=observed_at;
+    trial_recorded_battery_accepted=count==5;
+    return trial_battery_baseline_fresh();
+}
+
+static int trial_self_test(void) {
+    const char *forbidden[]={"erase:userdata","flash:metadata","erase:persist","flash:modemst1",
+        "erase:modemst2","flash:bootloader_a","flash:boot_b","erase:TA","Repartition:0",
+        "Write-TA:2:2170","Write-TA:2:2171","Write-TA:2:2127","reboot","continue","powerdown","set_active:b",NULL};
+    max_download_size=536870912; trial_partition="boot";
+    for (unsigned phase=TRIAL_READ;phase<=TRIAL_COMMIT;phase++) {
+        trial_phase=(enum trial_phase)phase;trial_completed=TRIAL_IMAGE_COUNT;
+        for(unsigned i=0;forbidden[i];i++) if(trial_command_allowed(forbidden[i])) return 1;
+    }
+    trial_phase=TRIAL_READ;
+    if(trial_command_allowed("download:00000001") || trial_command_allowed("Write-TA:2:10100")) return 1;
+    trial_phase=TRIAL_IMAGES;
+    if(!trial_command_allowed("erase:boot_a") || !trial_command_allowed("flash:boot_a") ||
+       trial_command_allowed("erase:boot") || trial_command_allowed("flash:boot") ||
+       trial_command_allowed("flash:modem_a") || trial_command_allowed("set_active:a") ||
+       !trial_slot_answer_ok("boot","yes") || trial_slot_answer_ok("boot","FAIL") || trial_slot_answer_ok("boot","no")) return 1;
+    trial_partition="super";
+    if(!trial_slot_answer_ok("super","no") || trial_slot_answer_ok("super","FAIL") || trial_slot_answer_ok("super","yes") ||
+       !trial_command_allowed("erase:super") || trial_command_allowed("erase:super_a")) return 1;
+    trial_phase=TRIAL_COMMIT;trial_completed=TRIAL_IMAGE_COUNT-1;
+    if(trial_command_allowed("set_active:a") || trial_command_allowed("Write-TA:2:10100")) return 1;
+    trial_completed=TRIAL_IMAGE_COUNT;
+    if(!trial_command_allowed("set_active:a")) return 1;
+    trial_phase=TRIAL_READ;trial_completed=0;trial_partition=NULL;trial_simulation=true;
+    char root_value[128];
+    if (trial_command_allowed("getvar:root-key-hash") || trial_command_allowed("getvar:default-security") ||
+        trial_command_allowed("getvar:sector-size") || !trial_command_allowed("Get-root-key-hash")) return 1;
+    if (!trial_read_root_hash(NULL,root_value,sizeof(root_value)) || strcmp(root_value,trial_root_hash)) return 1;
+    trial_fault=FAULT_ROOT_SEPARATE;
+    if (!trial_read_root_hash(NULL,root_value,sizeof(root_value)) || strcmp(root_value,trial_root_hash)) return 1;
+    puts("TRIAL_SELF_TEST_EXPECTED_NEGATIVE_ROOT_ACK_NO_USB");
+    trial_fault=FAULT_ROOT_BAD_ACK;
+    if (trial_read_root_hash(NULL,root_value,sizeof(root_value))) return 1;
+    puts("TRIAL_SELF_TEST_EXPECTED_WRONG_ROOT_NO_USB");
+    trial_fault=FAULT_ROOT_WRONG_HASH;
+    if (trial_device_check(NULL,"SIMULATION_ONLY") || trial_touched || trial_raw_bytes!=0) return 1;
+    trial_fault=FAULT_BATTERY_UNSUPPORTED;
+    puts("TRIAL_SELF_TEST_BATTERY_NO_USB");
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1; /* no baseline */
+    trial_android_battery=100;trial_battery_observed_at=(unsigned long)time(NULL);
+    if (!trial_device_check(NULL,"SIMULATION_ONLY") || !trial_battery_ready_to_write()) return 1;
+    /* Time spent on remaining read-only queries must not extend authorization. */
+    trial_battery_observed_at=(unsigned long)time(NULL)-601;
+    if (trial_battery_ready_to_write()) return 1;
+    trial_battery_observed_at=(unsigned long)time(NULL);
+    if (trial_device_check(NULL,"OTHER_DEVICE")) return 1;
+    trial_android_battery=60;
+    if (!trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    trial_android_battery=59;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    trial_android_battery=101;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    trial_android_battery=100;trial_battery_observed_at=(unsigned long)time(NULL)-601;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    trial_battery_observed_at=(unsigned long)time(NULL)+60;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    trial_battery_observed_at=(unsigned long)time(NULL);
+    const enum trial_fault battery_failures[]={FAULT_BATTERY_OTHER_FAILURE,FAULT_BATTERY_EMPTY,
+        FAULT_BATTERY_LOW,FAULT_BATTERY_MALFORMED,FAULT_BATTERY_FAKE_OKAY,FAULT_BATTERY_NUL_SUFFIX};
+    for (unsigned i=0;i<sizeof(battery_failures)/sizeof(battery_failures[0]);i++) {
+        trial_fault=battery_failures[i];
+        if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    }
+    char timestamp[32];snprintf(timestamp,sizeof(timestamp),"%lu",(unsigned long)time(NULL));
+    char *options[]={"--android-battery","100","--battery-observed-at",timestamp};
+    if (!trial_battery_options(4,options) || trial_battery_options(3,options)) return 1;
+    options[1]="59";
+    if (trial_battery_options(4,options)) return 1;
+    options[1]="100";options[3]="0";
+    if (trial_battery_options(4,options)) return 1;
+    snprintf(timestamp,sizeof(timestamp),"%lu",(unsigned long)time(NULL)-7200);
+    char *recorded[]={"--android-battery","98","--battery-observed-at",timestamp,"--accept-recorded-battery"};
+    if (trial_battery_options(4,recorded) || !trial_battery_options(5,recorded)) return 1;
+    trial_fault=FAULT_BATTERY_UNSUPPORTED;
+    if (!trial_device_check(NULL,"SIMULATION_ONLY") || !trial_battery_ready_to_write()) return 1;
+    trial_fault=FAULT_BATTERY_LOW;
+    if (trial_device_check(NULL,"SIMULATION_ONLY")) return 1;
+    snprintf(timestamp,sizeof(timestamp),"%lu",(unsigned long)time(NULL)+60);
+    if (trial_battery_options(5,recorded)) return 1;
+    if (trial_touched || trial_raw_bytes!=0) return 1;
+    puts("TRIAL_BATTERY_SELF_TEST_OK_NO_USB");
+    puts("TRIAL_GUARD_SELF_TEST_OK_NO_USB");return 0;
+}
+
+int main(int argc,char **argv) {
+    setvbuf(stdout,NULL,_IONBF,0);
+    signal(SIGUSR1,trial_request_stop);
+    signal(SIGINT,trial_request_stop);
+    signal(SIGTERM,trial_request_stop);
+    signal(SIGPIPE,SIG_IGN);
+    pid_t initial_parent=getppid();
+    bool probe=false; const char *expected_serial=NULL;
+    if(argc==2 && !strcmp(argv[1],"--self-test")) return trial_self_test();
+    if(argc>=2 && !strcmp(argv[1],"--simulate")) {
+        trial_simulation=true; expected_serial="SIMULATION_ONLY";
+        if(argc==4 && !strcmp(argv[2],"--fail-at")) {
+            unsigned long value;
+            if(!trial_uint(argv[3],&value) || value==0 || value>10000) return 2;
+            trial_fail_at=(unsigned)value;
+        } else if(argc==4 && !strcmp(argv[2],"--fault")) {
+            if(!strcmp(argv[3],"data-fail-prefix")) trial_fault=FAULT_DATA_FAIL_PREFIX;
+            else if(!strcmp(argv[3],"data-okay-prefix")) trial_fault=FAULT_DATA_OKAY_PREFIX;
+            else if(!strcmp(argv[3],"super-slot-failure")) trial_fault=FAULT_SUPER_SLOT;
+            else if(!strcmp(argv[3],"snapshot-merging")) trial_fault=FAULT_SNAPSHOT_MERGING;
+            else return 2;
+        } else if(argc!=2) return 2;
+    } else if((argc==3 || argc==7 || argc==8) && !strcmp(argv[1],"--probe")) {
+        probe=true;expected_serial=argv[2];
+        if (!trial_battery_options(argc-3,argv+3)) return 2;
+    } else if((argc==4 || argc==8 || argc==9) && !strcmp(argv[1],"--flash") && !strcmp(argv[3],"FS72_TO_FS54_265_A_KEEP_DATA_TRIAL")) {
+        expected_serial=argv[2];
+        if (!trial_battery_options(argc-4,argv+4)) return 2;
+    }
+    else {fprintf(stderr,"Usage: --self-test | --simulate [--fail-at N] | --probe SERIAL | --flash SERIAL FS72_TO_FS54_265_A_KEEP_DATA_TRIAL\n");return 2;}
+    if(!expected_serial || !*expected_serial || strlen(expected_serial)>100) return 2;
+    for(const char *s=expected_serial;*s;s++) if(!isalnum((unsigned char)*s) && *s!='_' && *s!='-' && *s!='.') return 2;
+    printf("FS72_PRESERVE_TRIAL_V1 mode=%s; experimental; no userdata/metadata/EFS/GPT/bootloader writes\n",probe?"read-only-probe":trial_simulation?"SIMULATION_NO_USB":"LIVE_FLASH");
+    FILE *inputs[TRIAL_IMAGE_COUNT]={0}; struct stat snapshots[TRIAL_IMAGE_COUNT];
+    HANDLE device=NULL; int claimed=-1; int result=1; char working_path[PATH_MAX];
+    if(!getcwd(working_path,sizeof(working_path)) || strlen(working_path)>150) return 2;
+    if(!probe) {
+        if(!trial_directory_ok() || !trial_space_ok()) {fprintf(stderr,"TRIAL_INPUT_REFUSED: directory or disk budget mismatch.\n");goto done;}
+        for(unsigned i=0;i<TRIAL_IMAGE_COUNT;i++) {
+            int fd=open(trial_images[i].name,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+            if(fd<0) goto done;
+            inputs[i]=fdopen(fd,"rb");
+            if(!inputs[i]) {close(fd);goto done;}
+            struct stat after;
+            if(fstat(fd,&snapshots[i]) || !S_ISREG(snapshots[i].st_mode) || (snapshots[i].st_mode&0222) ||
+               !trial_hash_file(inputs[i],trial_images[i].sha256,trial_images[i].bytes) || fstat(fd,&after) ||
+               !trial_same_file(&snapshots[i],&after)) {fprintf(stderr,"TRIAL_INPUT_HASH_REFUSED %s\n",trial_images[i].name);goto done;}
+        }
+        if(mkdir("flash_session",0700)!=0) {fprintf(stderr,"TRIAL_WORKSPACE_REFUSED\n");goto done;}
+    }
+    if(trial_stop_requested || getppid()!=initial_parent) goto done;
+    device=trial_simulation?(HANDLE)(uintptr_t)1:trial_open_usb(&claimed);
+    if(!device || !trial_device_check(device,expected_serial)) goto done;
+    if(probe) {puts("TRIAL_PROBE_OK_NO_WRITES");result=0;goto done;}
+    if(trial_stop_requested || getppid()!=initial_parent) goto done;
+    if (!trial_battery_ready_to_write()) {
+        fprintf(stderr,"TRIAL_BATTERY_BASELINE_EXPIRED_BEFORE_FIRST_WRITE; restart from Android.\n");goto done;
+    }
+    keep_userdata=true;
+    trial_phase=TRIAL_BEGIN;
+    if(!trial_flash_mode(device,true)) goto done;
+    trial_phase=TRIAL_IMAGES;
+    for(unsigned i=0;i<TRIAL_IMAGE_COUNT;i++) {
+        if(trial_stop_requested || getppid()!=initial_parent) goto done;
+        struct stat now;
+        if(!trial_space_ok() || fstat(fileno(inputs[i]),&now) || !trial_same_file(&snapshots[i],&now)) goto done;
+        trial_partition=trial_images[i].partition;
+        printf("TRIAL_IMAGE_BEGIN %s\n",trial_images[i].name);
+        if(!process_sins(device,inputs[i],(char *)trial_images[i].name,working_path,"flash_session","flash")) goto done;
+        if(fstat(fileno(inputs[i]),&now) || !trial_same_file(&snapshots[i],&now)) goto done;
+        trial_completed++;
+        printf("TRIAL_IMAGE_COMPLETE %s\n",trial_images[i].name);
+    }
+    if(trial_stop_requested || getppid()!=initial_parent) goto done;
+    trial_partition=NULL;trial_phase=TRIAL_COMMIT;
+    if(!trial_ok(device,"Sync") || !trial_flash_mode(device,false) || !trial_ok(device,"set_active:a") || !trial_ok(device,"Sync")) goto done;
+    puts(trial_simulation?"TRIAL_SIMULATION_COMPLETE_NO_USB":"TRIAL_COMPLETE_NO_REBOOT_FUNCTIONAL_RESULT_NOT_VERIFIED");
+    result=0;
+done:
+    if(trial_simulation) printf("TRIAL_SIMULATED_RAW_BYTES=%llu\n",trial_raw_bytes);
+    if(result) fprintf(stderr,"TRIAL_STOPPED completed_images=%u possible_device_write=%s simulated_mutation=%s; no automatic retry, slot switch, reboot or data reset follows.\n",trial_completed,(!trial_simulation && trial_touched)?"yes":"no",(trial_simulation && trial_touched)?"yes":"no");
+    if(device && !trial_simulation) {if(claimed>=0) libusb_release_interface(device,claimed);libusb_close(device);libusb_exit(NULL);}
+    for(unsigned i=0;i<TRIAL_IMAGE_COUNT;i++) if(inputs[i]) fclose(inputs[i]);
+    if(!probe) rmdir("flash_session");
+    return result;
+}

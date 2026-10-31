@@ -1,0 +1,6 @@
+__pycache__/
+build/
+.prepare.lock
+candidate-*/
+.*.building-*/
+*.log

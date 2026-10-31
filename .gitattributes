@@ -1,0 +1,2 @@
+# Pinned upstream input: preserve exact bytes, including original whitespace.
+flash-kit/upstream/newflasher-59f12e4.c.txt -text -whitespace
