@@ -118,11 +118,11 @@ def snapshot_images(session):
     return images
 
 
-def native(arguments, cwd, log):
+def native(arguments, cwd, log, *, binary=None):
     # No arbitrary host timeout/automatic retry. Cancellation asks the native
     # driver to stop at an image boundary, and we drain/wait rather than orphan it.
     with log.open('w') as output:
-        process = subprocess.Popen([str(BINARY), *arguments], cwd=cwd, stdout=subprocess.PIPE,
+        process = subprocess.Popen([str(BINARY if binary is None else binary), *arguments], cwd=cwd, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, start_new_session=True)
         errors = []
         log_ok = True
@@ -180,11 +180,14 @@ def native(arguments, cwd, log):
                 process.wait()
 
 
-def simulate(fail_at=None, fault=None):
-    receipt = checked_build()
+def simulate(fail_at=None, fault=None, *, materials=None):
+    check = checked_build if materials is None else materials.checked_build
+    snapshot = snapshot_images if materials is None else materials.snapshot_images
+    invoke = native if materials is None else materials.native
+    receipt = check()
     session = new_session('simulation')
     print('SIMULATION ONLY: no USB or phone access. Session:', session, flush=True)
-    images = snapshot_images(session)
+    images = snapshot(session)
     arguments = ['--simulate']
     if fail_at is not None and fault is not None:
         raise flashkit.SafetyError('Choose one simulation fault at a time')
@@ -196,7 +199,7 @@ def simulate(fail_at=None, fault=None):
         if fault not in {'data-fail-prefix', 'data-okay-prefix', 'super-slot-failure', 'snapshot-merging'}:
             raise flashkit.SafetyError('Unknown simulation fault')
         arguments.extend(['--fault', fault])
-    code = native(arguments, images, session / 'native.log')
+    code = invoke(arguments, images, session / 'native.log')
     text = (session / 'native.log').read_text()
     complete = 'TRIAL_SIMULATION_COMPLETE_NO_USB' in text and code == 0
     commands = [s.removeprefix('TRIAL_COMMAND ') for s in text.splitlines() if s.startswith('TRIAL_COMMAND ')]
@@ -240,14 +243,17 @@ def battery_arguments(baseline, serial):
     return ['--android-battery', str(level), '--battery-observed-at', str(observed_at)]
 
 
-def run(serial):
+def run(serial, *, materials=None):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise flashkit.SafetyError('Real writes require an interactive local terminal; no noninteractive confirmation bypass')
     validate_serial(serial)
-    receipt = checked_build()
-    print('正在核验固定源包并创建独立只读镜像副本；此阶段不写手机。', flush=True)
+    check = checked_build if materials is None else materials.checked_build
+    snapshot = snapshot_images if materials is None else materials.snapshot_images
+    invoke = native if materials is None else materials.native
+    receipt = check()
+    print('正在核验刷机文件并创建独立只读镜像副本；此阶段不写手机。', flush=True)
     session = new_session('live')
-    images = snapshot_images(session)
+    images = snapshot(session)
     print('读取正常开机手机的基线；现在请保持 Android 开机、USB 调试已授权。', flush=True)
     observed_at, observed_monotonic = time.time_ns() // 1_000_000_000, time.monotonic()
     baseline = flashkit.preflight(serial, expected=TRIAL_BASELINE)
@@ -280,10 +286,10 @@ def run(serial):
 不要运行其他刷机工具。进入后按回车，随后不要拔线或中断。
 ''')
     input('进入 Flash 模式后按回车进行只读设备检查；此步不写分区或TA。')
-    checked_build()
+    check()
     probe_dir = session / 'probe'
     probe_dir.mkdir(mode=0o700)
-    probe_code = native(['--probe', serial, *battery_arguments(baseline, serial)], probe_dir, session / 'probe.log')
+    probe_code = invoke(['--probe', serial, *battery_arguments(baseline, serial)], probe_dir, session / 'probe.log')
     if probe_code != 0 or 'TRIAL_PROBE_OK_NO_WRITES' not in (session / 'probe.log').read_text():
         (session / 'result.json').write_text(json.dumps({'mode': 'blocked_at_read_only_probe',
             'phone_write_requested': False, 'exit_code': probe_code}, indent=2) + '\n')
@@ -296,8 +302,8 @@ def run(serial):
         'functional_goal': flashkit.POLICY['goal'], 'data_risk_accepted': True,
         'runtime_capability_prevalidation_waived_for_trial': True,
         'build_binary_sha256': receipt['binary_sha256']}, indent=2) + '\n')
-    checked_build()
-    code = native(['--flash', serial, PHRASE, *battery_arguments(baseline, serial)], images, session / 'native.log')
+    check()
+    code = invoke(['--flash', serial, PHRASE, *battery_arguments(baseline, serial)], images, session / 'native.log')
     text = (session / 'native.log').read_text()
     complete = code == 0 and 'TRIAL_COMPLETE_NO_REBOOT_FUNCTIONAL_RESULT_NOT_VERIFIED' in text
     report = {'mode': 'live_trial', 'exit_code': code, 'images_completed': text.count('TRIAL_IMAGE_COMPLETE '),

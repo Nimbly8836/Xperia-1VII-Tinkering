@@ -14,6 +14,7 @@
 !/flash-kit/.gitignore
 !/flash-kit/*.py
 !/flash-kit/*.c.in
+!/flash-kit/bundle_start.py.in
 !/flash-kit/README.md
 !/flash-kit/TRIAL.md
 !/flash-kit/pyrightconfig.json
@@ -40,6 +41,7 @@
 !/docs/verified-results.md
 !/docs/termux-widget.md
 !/docs/linux.md
+!/docs/distribution.md
 !/docs/firmware-71.2.A.2.35-research.md
 
 # Defense in depth: firmware, proprietary extracts, credentials and outputs.

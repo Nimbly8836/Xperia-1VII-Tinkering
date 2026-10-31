@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Generated release entry. Verify runtime code before importing it."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import types
+
+MANIFEST_SHA256 = '__MANIFEST_SHA256__'
+APP_FILES = ('flashkit.py', 'trial.py', 'bundle_runtime.py')
+
+
+class BootstrapError(Exception):
+    pass
+
+
+def read_regular(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= limit:
+            raise BootstrapError('Invalid release metadata or runtime file')
+        raw = stream.read(limit + 1)
+        after = os.fstat(stream.fileno())
+        named = path.lstat()
+        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+        if not stat.S_ISREG(named.st_mode) or signature(before) != signature(after) or signature(before) != signature(named):
+            raise BootstrapError('Release file changed during verification')
+        return raw
+
+
+def main():
+    if sys.version_info < (3, 10):
+        raise BootstrapError('Python 3.10 or newer is required. See README.txt')
+    sys.dont_write_bytecode = True
+    root = Path(__file__).resolve().parent
+    raw = read_regular(root / 'manifest.json', 1024 * 1024)
+    if hashlib.sha256(raw).hexdigest() != MANIFEST_SHA256:
+        raise BootstrapError('Package manifest checksum mismatch; obtain the original release again')
+    try:
+        manifest = json.loads(raw)
+    except (ValueError, UnicodeError) as exc:
+        raise BootstrapError('Invalid release manifest') from exc
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict):
+        raise BootstrapError('Invalid release file list')
+    app = root / 'app'
+    if app.is_symlink() or not app.is_dir():
+        raise BootstrapError('Release application directory is missing or is a link')
+    for child in app.iterdir():
+        if child.name not in APP_FILES and not (child.name == '.DS_Store' and stat.S_ISREG(child.lstat().st_mode)):
+            raise BootstrapError('Unexpected runtime entry: ' + child.name)
+    verified = {}
+    for filename in APP_FILES:
+        expected = manifest['files'].get('app/' + filename)
+        if not isinstance(expected, dict):
+            raise BootstrapError('Missing pinned runtime module')
+        content = read_regular(app / filename, 1024 * 1024)
+        if len(content) != expected.get('bytes') or hashlib.sha256(content).hexdigest() != expected.get('sha256'):
+            raise BootstrapError('Runtime module checksum mismatch: ' + filename)
+        verified[filename] = content
+    # Execute only the source bytes already verified above. Do not add app/ to
+    # sys.path or use SourceFileLoader: packages, stdlib shadows and cached .pyc
+    # files must never replace these modules, even when -B is set.
+    for filename in APP_FILES:
+        name = filename[:-3]
+        module = types.ModuleType(name)
+        module.__file__ = str(app / filename)
+        module.__package__ = ''
+        sys.modules[name] = module
+        code = compile(verified[filename], module.__file__, 'exec', dont_inherit=True)
+        exec(code, module.__dict__)  # Executing pinned release code, not manifest data.
+    return sys.modules['bundle_runtime'].main(root, MANIFEST_SHA256)
+
+
+if __name__ == '__main__':
+    try:
+        raise SystemExit(main())
+    except (Exception, KeyboardInterrupt) as exc:
+        message = str(exc) if type(exc).__name__ in {'BootstrapError', 'SafetyError'} else type(exc).__name__
+        print('STOPPED: ' + message + '. No automatic retry.', file=sys.stderr)
+        raise SystemExit(2)

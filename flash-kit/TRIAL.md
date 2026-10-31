@@ -2,17 +2,23 @@
 
 本机已有刷机成功、用户数据保留和内置 eSIM 联网的反馈，详见[验证范围](../docs/verified-results.md)。本工具依旧是实验性代码，单台成功不替代备份、设备兼容性检查与本次刷后验收。
 
-完整环境安装、固定 ZIP 文件名/SHA、准备/构建步骤在[根 README](../README.md)，Linux 另见 [Linux 指南](../docs/linux.md)。本文仍仅描述 `.265` / V36 同版本跨刷，不是 `.265` → `.35` 升级方案；命令从仓库根目录执行。
+环境安装与两条入口见[根 README](../README.md)，发行包摘要核对与打包见[发行说明](../docs/distribution.md)，Linux 另见 [Linux 指南](../docs/linux.md)。本文仍仅描述 `.265` / V36 同版本跨刷，不是 `.265` → `.35` 升级方案。发行包命令从解压目录执行；源码命令从仓库根目录执行。
 
 ## 标准流程
 
 手机必须以正常 Android 启动，解锁并授权 USB 调试。刷前要求港版 FS72 `71.1.A.2.265 release-keys`、SKU `c001526`、Bootloader locked、Verified Boot green、DSDS、电量至少 60%。
 
+**发行包入口**：macOS 双击 `Start.command`，Linux 执行 `bash start.sh`。启动器只选择唯一 ADB 设备；无需原始 ZIP、源码或编译，仍需 Python 3.10+、ADB 和 libusb 运行库。包必须对应主机系统和架构，下载链接待补充。
+
+**源码入口**：完成根 README 的固定 ZIP 校验、准备和构建后执行：
+
 ```bash
 python3 flash-kit/trial.py run --serial YOUR_ADB_SERIAL
 ```
 
-1. 检查固定源包、候选、源码、生成源码和二进制摘要。
+两条入口均保留以下基线、只读检查和人工确认：
+
+1. 源码入口检查固定源包、候选、源码、生成源码和二进制摘要；发行包入口校验包内清单与运行文件，不要求原始 ZIP 或源码。发行包的来源需另用发布者在包外提供的 SHA-256 核对。
 2. 在私有临时会话目录中创建独立只读输入副本：macOS 使用 APFS clone，Linux 使用全量复制并校验摘要/空间/源文件稳定性。均不共享硬链接，不修改源固件。
 3. 只读核对当前 Android 身份和电量，记录真实读取时间。
 4. 按提示正常关机，按住音量减插入 USB，进入 Sony Flash 模式，不是 Fastboot；原生程序按 `0fce:b00b` 和明确序列号检查唯一目标。
@@ -65,7 +71,9 @@ bluetooth → dsp → featenabler → modem → pvmfw → spuservice
 
 ## 模拟与测试
 
-无需固件、无需手机：
+发行包在解压目录执行 `bash start.sh check` 进行仅电脑端校验，或执行 `bash start.sh simulate` 进行无 USB 模拟。
+
+以下为源码入口。无需固件、无需手机：
 
 ```bash
 python3 -m unittest discover -s flash-kit -p 'test_*.py' -v

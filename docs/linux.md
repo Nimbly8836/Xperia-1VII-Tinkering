@@ -8,7 +8,21 @@
 - **没有执行 Linux 真机刷写。** 容器和 mock 测试不证明实际 USB 时序、设备驱动、开机或数据保留。
 - 主机支持与固件支持是两回事。现有真实刷写策略仍限定 `.265` / V36；不能把支持 Linux 理解成已经批准 `.35` / V40 跨代升级。参见[新版研究](firmware-71.2.A.2.35-research.md)。
 
-## Debian / Ubuntu 安装依赖
+## 使用已经构建好的刷机包
+
+使用与你电脑架构匹配的包。目前生成的 Linux 包为 ARM64，要求 glibc 2.36+ 和 OpenSSL 3；Intel/AMD 的 x86_64 电脑不能使用这个 ARM64 包。
+
+Debian 12 的运行依赖如下，不需要编译器：
+
+```bash
+sudo apt-get update
+sudo apt-get install python3 adb android-sdk-platform-tools-common \
+  libusb-1.0-0 libssl3 zlib1g libexpat1
+```
+
+按下面的说明准备临时空间和 USB 权限后，在解压目录执行 `bash start.sh`。校验包可用 `bash start.sh check`，模拟用 `bash start.sh simulate`。无需原始固件 ZIP 或源码目录。包的版本与校验码见[发行说明](distribution.md)。
+
+## 自行编译时安装依赖
 
 ```bash
 sudo apt-get update
@@ -33,15 +47,15 @@ Linux 不要求 APFS，也不依赖 reflink。每次 `run` 或 `simulate` 都在
 - 校验源文件及路径前后稳定、目标独立 inode、大小与 SHA-256，最后设为只读。
 - 原生程序再次校验摘要与纳秒级 mtime/ctime，保留原安全检查。
 
-`.265` 的一次会话另占约 5 GiB。`/tmp` 可能是容量很小的 tmpfs，请把临时目录放在空间充足的本地磁盘上。比如从仓库根目录执行：
+`.265` 的一次会话另占约 5 GiB。`/tmp` 可能是容量很小的 tmpfs，请把临时目录放在空间充足的本地磁盘上，并放在刷机包之外：
 
 ```bash
-mkdir -p .sessions
-chmod 700 .sessions
-export TMPDIR="$PWD/.sessions"
+mkdir -p "$HOME/.cache/xperia-flash-sessions"
+chmod 700 "$HOME/.cache/xperia-flash-sessions"
+export TMPDIR="$HOME/.cache/xperia-flash-sessions"
 ```
 
-`.sessions/` 被根白名单忽略，里面可能含设备序列号和授权记录，不要上传。使用较短的仓库/临时目录路径；受限原生程序目前要求镜像工作路径不超过 150 字符。不要为了释放空间删除需要分析的失败会话，也不要运行中清理临时文件。
+会话可能含设备序列号和授权记录，不要上传，也不要把会话目录或日志放进刷机包内。使用较短的仓库/临时目录路径；受限原生程序目前要求镜像工作路径不超过 150 字符。不要为了释放空间删除需要分析的失败会话，也不要运行中清理临时文件。
 
 ## 不接手机的验证
 
@@ -71,7 +85,7 @@ python3 flash-kit/trial.py simulate
 
 这些命令不访问 USB。不要将测试用假镜像表复制到生产 `build/`，不要手工编辑构建收据。
 
-两端（macOS 与 Debian 12 arm64）均已运行 **101 项测试，无跳过**，包含 XML 审查、原生测试及 Widget 脚本的静态/语法检查；测试不会实际执行 Widget 切卡请求。`.35` 的离线审查命令见[新版指南](firmware-71.2.A.2.35-research.md#4-可重复的离线审查入口)，它不会因审查通过而启用刷写。
+两端（macOS 与 Debian 12 arm64）均运行离线测试，包含 XML 审查、原生测试、发行包校验及 Widget 脚本的静态/语法检查；测试不会实际执行 Widget 切卡请求。`.35` 的离线审查命令见[新版指南](firmware-71.2.A.2.35-research.md#4-可重复的离线审查入口)，它不会因审查通过而启用刷写。
 
 ## 实际 USB 使用前的权限配置
 
@@ -80,7 +94,7 @@ python3 flash-kit/trial.py simulate
 ADB 由发行版平台工具规则管理，手机上须手动授权。Sony **Flash 模式**则是另一个 USB 设备 `0fce:b00b`。桌面 systemd/logind 环境可安装本仓库的限定规则：
 
 ```bash
-sudo install -m 0644 scripts/70-xperia-flash.rules /etc/udev/rules.d/70-xperia-flash.rules
+printf '%s\n' 'SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0fce", ATTR{idProduct}=="b00b", MODE="0660", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/70-xperia-flash.rules > /dev/null
 sudo udevadm control --reload-rules
 ```
 
@@ -92,7 +106,7 @@ sudo udevadm control --reload-rules
 
 ## 实际命令与限制
 
-环境、备份、设备版本及固件均满足[详细流程](../flash-kit/TRIAL.md)之后，真实写入入口与 macOS 相同：
+环境、备份、设备版本及固件均满足[详细流程](../flash-kit/TRIAL.md)之后，发行包使用 `bash start.sh`。只有自行从源码构建时才使用以下入口：
 
 ```bash
 python3 flash-kit/trial.py run --serial YOUR_ADB_SERIAL
