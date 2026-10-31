@@ -16,7 +16,7 @@
 | 港版 FS72 跨刷 FS54，同时保留原有用户数据 | 我的 `.265` 实机成功，不 Root、不解锁 Bootloader、不主动清用户数据；不保证其他设备成功 |
 | 识别并使用内置 eSIM | 我的手机已识别内置 eUICC，套餐已激活并联网，不是依赖外置物理 eSIM 卡 |
 | “实体卡 + eSIM ↔ 双实体 SIM”切换 | 我的实机已验证可以自由往返切换，不需要反复刷固件 |
-| Termux 脚本快速切换 | 我的实机已验证可用；具体脚本和权限配置尚未收录 |
+| Termux:Widget 快速切换 | 我的实机已验证 Shizuku/rish 方案；已收录[英文快捷脚本与配置说明](docs/termux-widget.md) |
 | macOS / Linux 工具链 | 支持离线准备、编译、模拟及刷写入口；Linux 已做离线验证，尚未做 Linux 真机刷写 |
 
 **不代表三张卡同时工作。** 进入 eSIM 模式时，第二张实体卡暂停读取；切回实体卡模式时，eSIM 可能暂时不可访问。
@@ -57,7 +57,7 @@
 | 第一次下载这个仓库 | **必须先完成文末的[离线准备与编译](#离线准备编译与验证)**：安装依赖、放好固定固件、生成候选、编译并模拟；仓库不提供现成的刷写二进制 |
 | 已在当前电脑准备好，且构建输入/二进制未变化 | 可以直接使用下面的 `trial.py run`，程序会重新校验；**不要求每次刷机前都重新编译** |
 | 源码、构建输入变化，或换了系统/CPU 架构 | 重新编译并测试；不能复制旧收据或修改摘要绕过 |
-| 已刷好，只想切换 SIM/eSIM | 使用 Python 切换脚本即可，**不需要编译 C 刷写器，也不需要重新刷机** |
+| 已刷好，只想切换 SIM/eSIM | 使用电脑端 Python + ADB，或手机端 Termux:Widget + Shizuku/rish；**均不需要编译 C 刷写器，也不需要重新刷机** |
 | 想升级 `.35` 或使用其他机型/版本 | 停止，本页实际刷写流程不适用 |
 
 **`trial.py run` 不会替你下载固件、生成候选或自动编译。** 因此“直接用脚本刷机”指的是完成首次准备后，通过脚本进入受限流程，不是 clone 后一条命令即可安全刷机。
@@ -87,7 +87,7 @@ FS72_TO_FS54_265_A_KEEP_DATA_TRIAL
 
 **写入完成不等于功能验收通过。** 检查失败就停止；写入中断或结果未知时，不要盲目重试、切槽、清数据或换包补刷。只读检查失败与已经部分写入的处理不同，完整流程、电量时效和失败处理见 [TRIAL.md](flash-kit/TRIAL.md)。
 
-### 3. 刷好后切换 SIM / eSIM
+### 3. 电脑端：刷好后切换 SIM / eSIM
 
 切换时手机必须正常运行 Android、USB 调试已授权，版本符合切换脚本门禁。脚本默认只预览，只有加 `--execute` 且手动确认后才会发送一次请求。**切换会中断相关卡的通信；实机成功案例不替代本次状态检查。**
 
@@ -113,11 +113,18 @@ python3 scripts/switch_sim.py physical --serial YOUR_ADB_SERIAL --execute
 
 脚本不删除 eSIM 套餐，不替你下载套餐，也不自动重试、重启或回切。完成后自行检查卡识别、联网和所需业务。`Broadcast completed` 只表示广播调用返回，**不证明切换或业务已经成功**。
 
-### 4. Termux 快速切换
+### 4. 手机端：Termux:Widget 快速切换
 
-我的实机已验证 Termux 脚本快速切换可用，具体脚本和权限配置待收录。目前不提供猜测的一键命令。
+我的实机使用的是 **Termux:Widget → Termux 脚本 → Shizuku/rish → 系统切卡广播**，已验证可以往返切换。两个脚本现已收录，文件名和提示均为英文：
 
-**普通 Termux 应用进程不等同于 ADB shell。** 实际使用无线 ADB、Shizuku/rish、root 还是其他方式，须以原脚本为准；不能直接删去电脑端命令的 `adb shell` 前缀就认为等价。此结果不代表 `.35`、重启保持或 OTA 已验证。
+- [`enable-esim.sh`](scripts/termux-widget/enable-esim.sh)：切换到内置 eSIM。
+- [`enable-dual-sim.sh`](scripts/termux-widget/enable-dual-sim.sh)：切回双实体卡。
+
+按[配置指南](docs/termux-widget.md)启动并授权 Shizuku，将配套 rish 文件放入 `~/.local/share/xperia-rish/`，再将两个脚本复制到 `~/.shortcuts/`，添加并刷新桌面 Widget。配置完成且 Shizuku 正在运行时，点击对应脚本即可请求切换，不需要每次连接电脑，也无需编译或下载固件。
+
+**与电脑端 Python 脚本不同：Widget 脚本点击即发送请求，没有预览、二次确认或自动型号/版本/MEP 检查。** 末尾的 `Press Enter` 只是执行后的关窗暂停。必须事先核对环境和卡槽状态，操作会中断通信；命令结束后到 SIM 设置确认，不能把退出码 0 当成切换成功。
+
+普通 Termux 应用进程不是 ADB shell，脚本通过已授权的 Shizuku/rish 执行系统命令，不是直接删掉 `adb shell` 前缀。脚本本身不调用 `su`；此实机结果仍不代表 `.35`、重启保持或 OTA 已验证。
 
 ## 原理与写入边界
 
@@ -246,7 +253,8 @@ XPERIA_NATIVE_TESTS=1 python3 -m unittest discover -s flash-kit -p 'test_*.py' -
 ### 5. 文件、隐私与许可证
 
 - [`flash-kit/`](flash-kit/README.md)：准备、构建、受限执行器和测试；[详细刷写与失败处理](flash-kit/TRIAL.md)。
-- [`scripts/switch_sim.py`](scripts/switch_sim.py)：Python + ADB 切换脚本，无需 C 编译。
+- [`scripts/switch_sim.py`](scripts/switch_sim.py)：电脑端 Python + ADB 切换脚本，无需 C 编译。
+- [`scripts/termux-widget/`](scripts/termux-widget/)：手机端英文快捷脚本；[Termux:Widget 配置指南](docs/termux-widget.md)。
 - [`docs/verified-results.md`](docs/verified-results.md)：实机结果、用户反馈与尚未验收的边界。
 - 固件、解包文件、构建产物、日志、下载 metadata、原始设备 dump 和会话授权均被忽略，不随仓库提交。不要用 `git add -f` 上传它们。
 - 不公开序列号、IMEI、EID、ICCID、手机号、eSIM 激活码、配对码、私钥或带临时参数的下载 URL。

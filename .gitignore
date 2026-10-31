@@ -31,8 +31,14 @@
 !/scripts/switch_sim.py
 !/scripts/test_switch_sim.py
 !/scripts/70-xperia-flash.rules
+!/scripts/test_termux_widget.py
+!/scripts/termux-widget/
+/scripts/termux-widget/*
+!/scripts/termux-widget/enable-esim.sh
+!/scripts/termux-widget/enable-dual-sim.sh
 /docs/*
 !/docs/verified-results.md
+!/docs/termux-widget.md
 !/docs/linux.md
 !/docs/firmware-71.2.A.2.35-research.md
 
